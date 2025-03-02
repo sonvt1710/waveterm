@@ -1,9 +1,10 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package cmd
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,27 +19,39 @@ var viewMagnified bool
 
 var viewCmd = &cobra.Command{
 	Use:     "view {file|directory|URL}",
+	Aliases: []string{"preview", "open"},
 	Short:   "preview/edit a file or directory",
-	Args:    cobra.ExactArgs(1),
-	Run:     viewRun,
+	RunE:    viewRun,
 	PreRunE: preRunSetupRpcClient,
 }
 
 var editCmd = &cobra.Command{
 	Use:     "edit {file}",
 	Short:   "edit a file",
-	Args:    cobra.ExactArgs(1),
-	Run:     viewRun,
+	RunE:    viewRun,
 	PreRunE: preRunSetupRpcClient,
 }
 
 func init() {
 	viewCmd.Flags().BoolVarP(&viewMagnified, "magnified", "m", false, "open view in magnified mode")
 	rootCmd.AddCommand(viewCmd)
+	editCmd.Flags().BoolVarP(&viewMagnified, "magnified", "m", false, "open view in magnified mode")
 	rootCmd.AddCommand(editCmd)
 }
 
-func viewRun(cmd *cobra.Command, args []string) {
+func viewRun(cmd *cobra.Command, args []string) (rtnErr error) {
+	cmdName := cmd.Name()
+	defer func() {
+		sendActivity(cmdName, rtnErr == nil)
+	}()
+	if len(args) == 0 {
+		OutputHelpMessage(cmd)
+		return fmt.Errorf("no arguments.  wsh %s requires a file or URL as an argument argument", cmdName)
+	}
+	if len(args) > 1 {
+		OutputHelpMessage(cmd)
+		return fmt.Errorf("too many arguments.  wsh %s requires exactly one argument", cmdName)
+	}
 	fileArg := args[0]
 	conn := RpcContext.Conn
 	var wshCmd *wshrpc.CommandCreateBlockData
@@ -55,22 +68,18 @@ func viewRun(cmd *cobra.Command, args []string) {
 	} else {
 		absFile, err := filepath.Abs(fileArg)
 		if err != nil {
-			WriteStderr("[error] getting absolute path: %v\n", err)
-			return
+			return fmt.Errorf("getting absolute path: %w", err)
 		}
 		absParent, err := filepath.Abs(filepath.Dir(fileArg))
 		if err != nil {
-			WriteStderr("[error] getting absolute path of parent dir: %v\n", err)
-			return
+			return fmt.Errorf("getting absolute path of parent dir: %w", err)
 		}
 		_, err = os.Stat(absParent)
 		if err == fs.ErrNotExist {
-			WriteStderr("[error] parent directory does not exist: %q\n", absParent)
-			return
+			return fmt.Errorf("parent directory does not exist: %q", absParent)
 		}
 		if err != nil {
-			WriteStderr("[error] getting file info: %v\n", err)
-			return
+			return fmt.Errorf("getting file info: %w", err)
 		}
 		wshCmd = &wshrpc.CommandCreateBlockData{
 			BlockDef: &waveobj.BlockDef{
@@ -81,7 +90,7 @@ func viewRun(cmd *cobra.Command, args []string) {
 			},
 			Magnified: viewMagnified,
 		}
-		if cmd.Use == "edit" {
+		if cmdName == "edit" {
 			wshCmd.BlockDef.Meta[waveobj.MetaKey_Edit] = true
 		}
 		if conn != "" {
@@ -90,7 +99,7 @@ func viewRun(cmd *cobra.Command, args []string) {
 	}
 	_, err := RpcClient.SendRpcRequest(wshrpc.Command_CreateBlock, wshCmd, &wshrpc.RpcOpts{Timeout: 2000})
 	if err != nil {
-		WriteStderr("[error] running view command: %v\r\n", err)
-		return
+		return fmt.Errorf("running view command: %w", err)
 	}
+	return nil
 }

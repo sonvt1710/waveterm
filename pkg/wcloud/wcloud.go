@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package wcloud
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/wavetermdev/waveterm/pkg/telemetry"
+	"github.com/wavetermdev/waveterm/pkg/telemetry/telemetrydata"
 	"github.com/wavetermdev/waveterm/pkg/util/daystr"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 )
@@ -26,6 +27,9 @@ const WCloudEndpoint = "https://api.waveterm.dev/central"
 const WCloudEndpointVarName = "WCLOUD_ENDPOINT"
 const WCloudWSEndpoint = "wss://wsapi.waveterm.dev/"
 const WCloudWSEndpointVarName = "WCLOUD_WS_ENDPOINT"
+
+var WCloudWSEndpoint_VarCache string
+var WCloudEndpoint_VarCache string
 
 const APIVersion = 1
 const MaxPtyUpdateSize = (128 * 1024)
@@ -40,18 +44,52 @@ const WCloudWebShareUpdateTimeout = 15 * time.Second
 const MaxUpdatePayloadSize = 1 * (1024 * 1024)
 
 const TelemetryUrl = "/telemetry"
+const TEventsUrl = "/tevents"
 const NoTelemetryUrl = "/no-telemetry"
 const WebShareUpdateUrl = "/auth/web-share-update"
+
+func CacheAndRemoveEnvVars() error {
+	WCloudEndpoint_VarCache = os.Getenv(WCloudEndpointVarName)
+	err := checkEndpointVar(WCloudEndpoint_VarCache, "wcloud endpoint", WCloudEndpointVarName)
+	if err != nil {
+		return err
+	}
+	os.Unsetenv(WCloudEndpointVarName)
+	WCloudWSEndpoint_VarCache = os.Getenv(WCloudWSEndpointVarName)
+	err = checkWSEndpointVar(WCloudWSEndpoint_VarCache, "wcloud ws endpoint", WCloudWSEndpointVarName)
+	if err != nil {
+		return err
+	}
+	os.Unsetenv(WCloudWSEndpointVarName)
+	return nil
+}
+
+func checkEndpointVar(endpoint string, debugName string, varName string) error {
+	if !wavebase.IsDevMode() {
+		return nil
+	}
+	if endpoint == "" || !strings.HasPrefix(endpoint, "https://") {
+		return fmt.Errorf("invalid %s, %s not set or invalid", debugName, varName)
+	}
+	return nil
+}
+
+func checkWSEndpointVar(endpoint string, debugName string, varName string) error {
+	if !wavebase.IsDevMode() {
+		return nil
+	}
+	log.Printf("checking endpoint %q\n", endpoint)
+	if endpoint == "" || !strings.HasPrefix(endpoint, "wss://") {
+		return fmt.Errorf("invalid %s, %s not set or invalid", debugName, varName)
+	}
+	return nil
+}
 
 func GetEndpoint() string {
 	if !wavebase.IsDevMode() {
 		return WCloudEndpoint
 	}
-	endpoint := os.Getenv(WCloudEndpointVarName)
-	if endpoint == "" || !strings.HasPrefix(endpoint, "https://") {
-		log.Printf("Invalid wcloud dev endpoint, WCLOUD_ENDPOINT not set or invalid\n")
-		return ""
-	}
+	endpoint := WCloudEndpoint_VarCache
 	return endpoint
 }
 
@@ -59,11 +97,7 @@ func GetWSEndpoint() string {
 	if !wavebase.IsDevMode() {
 		return WCloudWSEndpoint
 	}
-	endpoint := os.Getenv(WCloudWSEndpointVarName)
-	if endpoint == "" || !strings.HasPrefix(endpoint, "wss://") {
-		log.Printf("Invalid wcloud ws dev endpoint, WCLOUD_WS_ENDPOINT not set or invalid\n")
-		return ""
-	}
+	endpoint := WCloudWSEndpoint_VarCache
 	return endpoint
 }
 
@@ -116,11 +150,89 @@ func doRequest(req *http.Request, outputObj interface{}) (*http.Response, error)
 	return resp, nil
 }
 
-func SendTelemetry(ctx context.Context, clientId string) error {
+type TEventsInputType struct {
+	ClientId string                  `json:"clientid"`
+	Events   []*telemetrydata.TEvent `json:"events"`
+}
+
+const TEventsBatchSize = 200
+const TEventsMaxBatches = 10
+
+// returns (done, num-sent, error)
+func sendTEventsBatch(clientId string) (bool, int, error) {
+	ctx, cancelFn := context.WithTimeout(context.Background(), WCloudDefaultTimeout)
+	defer cancelFn()
+	events, err := telemetry.GetNonUploadedTEvents(ctx, TEventsBatchSize)
+	if err != nil {
+		return true, 0, fmt.Errorf("cannot get events: %v", err)
+	}
+	if len(events) == 0 {
+		return true, 0, nil
+	}
+	log.Printf("[wcloud] sending %d tevents\n", len(events))
+	input := TEventsInputType{
+		ClientId: clientId,
+		Events:   events,
+	}
+	req, err := makeAnonPostReq(ctx, TEventsUrl, input)
+	if err != nil {
+		return true, 0, err
+	}
+	_, err = doRequest(req, nil)
+	if err != nil {
+		return true, 0, err
+	}
+	err = telemetry.MarkTEventsAsUploaded(ctx, events)
+	if err != nil {
+		return true, 0, fmt.Errorf("error marking activity as uploaded: %v", err)
+	}
+	return len(events) < TEventsBatchSize, len(events), nil
+}
+
+func sendTEvents(clientId string) (int, error) {
+	numIters := 0
+	totalEvents := 0
+	for {
+		numIters++
+		done, numEvents, err := sendTEventsBatch(clientId)
+		if err != nil {
+			log.Printf("error sending telemetry events: %v\n", err)
+			break
+		}
+		totalEvents += numEvents
+		if done {
+			break
+		}
+		if numIters > TEventsMaxBatches {
+			log.Printf("sendTEvents, hit %d iterations, stopping\n", numIters)
+			break
+		}
+	}
+	return totalEvents, nil
+}
+
+func SendAllTelemetry(ctx context.Context, clientId string) error {
+	defer func() {
+		ctx, cancelFn := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelFn()
+		telemetry.CleanOldTEvents(ctx)
+	}()
 	if !telemetry.IsTelemetryEnabled() {
 		log.Printf("telemetry disabled, not sending\n")
 		return nil
 	}
+	_, err := sendTEvents(clientId)
+	if err != nil {
+		return err
+	}
+	err = sendTelemetry(ctx, clientId)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func sendTelemetry(ctx context.Context, clientId string) error {
 	activity, err := telemetry.GetNonUploadedActivity(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot get activity: %v", err)

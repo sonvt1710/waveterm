@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import * as util from "./util";
@@ -29,6 +29,35 @@ function keydownWrapper(
             event.stopPropagation();
         }
     };
+}
+
+function waveEventToKeyDesc(waveEvent: WaveKeyboardEvent): string {
+    let keyDesc: string[] = [];
+    if (waveEvent.cmd) {
+        keyDesc.push("Cmd");
+    }
+    if (waveEvent.option) {
+        keyDesc.push("Option");
+    }
+    if (waveEvent.meta) {
+        keyDesc.push("Meta");
+    }
+    if (waveEvent.control) {
+        keyDesc.push("Ctrl");
+    }
+    if (waveEvent.shift) {
+        keyDesc.push("Shift");
+    }
+    if (waveEvent.key != null && waveEvent.key != "") {
+        if (waveEvent.key == " ") {
+            keyDesc.push("Space");
+        } else {
+            keyDesc.push(waveEvent.key);
+        }
+    } else {
+        keyDesc.push("c{" + waveEvent.code + "}");
+    }
+    return keyDesc.join(":");
 }
 
 function parseKey(key: string): { key: string; type: string } {
@@ -183,7 +212,7 @@ function checkKeyPressed(event: WaveKeyboardEvent, keyDescription: string): bool
     }
     if (keyPress.keyType == KeyTypeKey) {
         eventKey = event.key;
-        if (eventKey.length == 1 && /[A-Z]/.test(eventKey.charAt(0))) {
+        if (eventKey != null && eventKey.length == 1 && /[A-Z]/.test(eventKey.charAt(0))) {
             // key is upper case A-Z, this means shift is applied, we want to allow
             // "Shift:e" as well as "Shift:E" or "E"
             eventKey = eventKey.toLocaleLowerCase();
@@ -210,6 +239,7 @@ function adaptFromReactOrNativeKeyEvent(event: React.KeyboardEvent | KeyboardEve
     rtn.code = event.code;
     rtn.key = event.key;
     rtn.location = event.location;
+    (rtn as any).nativeEvent = event;
     if (event.type == "keydown" || event.type == "keyup" || event.type == "keypress") {
         rtn.type = event.type;
     } else {
@@ -241,6 +271,56 @@ function adaptFromElectronKeyEvent(event: any): WaveKeyboardEvent {
     return rtn;
 }
 
+const keyMap = {
+    Enter: "\r",
+    Backspace: "\x7f",
+    Tab: "\t",
+    Escape: "\x1b",
+    ArrowUp: "\x1b[A",
+    ArrowDown: "\x1b[B",
+    ArrowRight: "\x1b[C",
+    ArrowLeft: "\x1b[D",
+    Insert: "\x1b[2~",
+    Delete: "\x1b[3~",
+    Home: "\x1b[1~",
+    End: "\x1b[4~",
+    PageUp: "\x1b[5~",
+    PageDown: "\x1b[6~",
+};
+
+function keyboardEventToASCII(event: WaveKeyboardEvent): string {
+    // check modifiers
+    // if no modifiers are set, just send the key
+    if (!event.alt && !event.control && !event.meta) {
+        if (event.key == null || event.key == "") {
+            return "";
+        }
+        if (keyMap[event.key] != null) {
+            return keyMap[event.key];
+        }
+        if (event.key.length == 1) {
+            return event.key;
+        } else {
+            console.log("not sending keyboard event", event.key, event);
+        }
+    }
+    // if meta or alt is set, there is no ASCII representation
+    if (event.meta || event.alt) {
+        return "";
+    }
+    // if ctrl is set, if it is a letter, subtract 64 from the uppercase value to get the ASCII value
+    if (event.control) {
+        if (
+            (event.key.length === 1 && event.key >= "A" && event.key <= "Z") ||
+            (event.key >= "a" && event.key <= "z")
+        ) {
+            const key = event.key.toUpperCase();
+            return String.fromCharCode(key.charCodeAt(0) - 64);
+        }
+    }
+    return "";
+}
+
 export {
     adaptFromElectronKeyEvent,
     adaptFromReactOrNativeKeyEvent,
@@ -248,7 +328,9 @@ export {
     getKeyUtilPlatform,
     isCharacterKeyEvent,
     isInputEvent,
+    keyboardEventToASCII,
     keydownWrapper,
     parseKeyDescription,
     setKeyUtilPlatform,
+    waveEventToKeyDesc,
 };

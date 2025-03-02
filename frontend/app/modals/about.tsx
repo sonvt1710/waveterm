@@ -1,15 +1,14 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import Logo from "@/app/asset/logo.svg";
-import { LinkButton } from "@/app/element/linkbutton";
 import { modalsModel } from "@/app/store/modalmodel";
 import { Modal } from "./modal";
 
 import { isDev } from "@/util/isdev";
 import { useState } from "react";
 import { getApi } from "../store/global";
-import "./about.less";
+import "./about.scss";
 
 interface AboutModalProps {}
 
@@ -37,31 +36,30 @@ const AboutModal = ({}: AboutModalProps) => {
                     Update Channel: {updaterChannel}
                 </div>
                 <div className="section links">
-                    <LinkButton
-                        className="secondary solid"
+                    <a
                         href="https://github.com/wavetermdev/waveterm"
                         target="_blank"
-                        leftIcon={<i className="fa-brands fa-github"></i>}
+                        rel="noopener"
+                        className="inline-flex items-center px-4 py-2 rounded border border-border hover:bg-hoverbg transition-colors duration-200"
                     >
-                        Github
-                    </LinkButton>
-                    <LinkButton
-                        className="secondary solid"
+                        <i className="fa-brands fa-github mr-2"></i>Github
+                    </a>
+                    <a
                         href="https://www.waveterm.dev/"
                         target="_blank"
-                        leftIcon={<i className="fa-sharp fa-light fa-globe"></i>}
+                        rel="noopener"
+                        className="inline-flex items-center px-4 py-2 rounded border border-border hover:bg-hoverbg transition-colors duration-200"
                     >
-                        Website
-                    </LinkButton>
-                    <LinkButton
-                        className="secondary solid"
+                        <i className="fa-sharp fa-light fa-globe mr-2"></i>Website
+                    </a>
+                    <a
                         href="https://github.com/wavetermdev/waveterm/blob/main/ACKNOWLEDGEMENTS.md"
                         target="_blank"
-                        rel={"noopener"}
-                        leftIcon={<i className="fa-sharp fa-light fa-heart"></i>}
+                        rel="noopener"
+                        className="inline-flex items-center px-4 py-2 rounded border border-border hover:bg-hoverbg transition-colors duration-200"
                     >
-                        Acknowledgements
-                    </LinkButton>
+                        <i className="fa-sharp fa-light fa-heart mr-2"></i>Acknowledgements
+                    </a>
                 </div>
                 <div className="section text-standard">&copy; {currentDate.getFullYear()} Command Line Inc.</div>
             </div>

@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package objectservice
@@ -12,7 +12,7 @@ import (
 	"github.com/wavetermdev/waveterm/pkg/tsgen/tsgenmeta"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
 	"github.com/wavetermdev/waveterm/pkg/wcore"
-	"github.com/wavetermdev/waveterm/pkg/wlayout"
+	"github.com/wavetermdev/waveterm/pkg/wps"
 	"github.com/wavetermdev/waveterm/pkg/wstore"
 )
 
@@ -72,76 +72,6 @@ func (svc *ObjectService) GetObjects(orefStrArr []string) ([]waveobj.WaveObj, er
 	return wstore.DBSelectORefs(ctx, orefArr)
 }
 
-func (svc *ObjectService) AddTabToWorkspace_Meta() tsgenmeta.MethodMeta {
-	return tsgenmeta.MethodMeta{
-		ArgNames:   []string{"uiContext", "tabName", "activateTab"},
-		ReturnDesc: "tabId",
-	}
-}
-
-func (svc *ObjectService) AddTabToWorkspace(uiContext waveobj.UIContext, tabName string, activateTab bool) (string, waveobj.UpdatesRtnType, error) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), DefaultTimeout)
-	defer cancelFn()
-	ctx = waveobj.ContextWithUpdates(ctx)
-	tabId, err := wcore.CreateTab(ctx, uiContext.WindowId, tabName, activateTab)
-	if err != nil {
-		return "", nil, fmt.Errorf("error creating tab: %w", err)
-	}
-
-	err = wlayout.ApplyPortableLayout(ctx, tabId, wlayout.GetNewTabLayout())
-	if err != nil {
-		return "", nil, fmt.Errorf("error applying new tab layout: %w", err)
-	}
-	return tabId, waveobj.ContextGetUpdatesRtn(ctx), nil
-}
-
-func (svc *ObjectService) UpdateWorkspaceTabIds_Meta() tsgenmeta.MethodMeta {
-	return tsgenmeta.MethodMeta{
-		ArgNames: []string{"uiContext", "workspaceId", "tabIds"},
-	}
-}
-
-func (svc *ObjectService) UpdateWorkspaceTabIds(uiContext waveobj.UIContext, workspaceId string, tabIds []string) (waveobj.UpdatesRtnType, error) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), DefaultTimeout)
-	defer cancelFn()
-	ctx = waveobj.ContextWithUpdates(ctx)
-	err := wstore.UpdateWorkspaceTabIds(ctx, workspaceId, tabIds)
-	if err != nil {
-		return nil, fmt.Errorf("error updating workspace tab ids: %w", err)
-	}
-	return waveobj.ContextGetUpdatesRtn(ctx), nil
-}
-
-func (svc *ObjectService) SetActiveTab_Meta() tsgenmeta.MethodMeta {
-	return tsgenmeta.MethodMeta{
-		ArgNames: []string{"uiContext", "tabId"},
-	}
-}
-
-func (svc *ObjectService) SetActiveTab(uiContext waveobj.UIContext, tabId string) (waveobj.UpdatesRtnType, error) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), DefaultTimeout)
-	defer cancelFn()
-	ctx = waveobj.ContextWithUpdates(ctx)
-	err := wstore.SetActiveTab(ctx, uiContext.WindowId, tabId)
-	if err != nil {
-		return nil, fmt.Errorf("error setting active tab: %w", err)
-	}
-	// check all blocks in tab and start controllers (if necessary)
-	tab, err := wstore.DBMustGet[*waveobj.Tab](ctx, tabId)
-	if err != nil {
-		return nil, fmt.Errorf("error getting tab: %w", err)
-	}
-	blockORefs := tab.GetBlockORefs()
-	blocks, err := wstore.DBSelectORefs(ctx, blockORefs)
-	if err != nil {
-		return nil, fmt.Errorf("error getting tab blocks: %w", err)
-	}
-	updates := waveobj.ContextGetUpdatesRtn(ctx)
-	updates = append(updates, waveobj.MakeUpdate(tab))
-	updates = append(updates, waveobj.MakeUpdates(blocks)...)
-	return updates, nil
-}
-
 func (svc *ObjectService) UpdateTabName_Meta() tsgenmeta.MethodMeta {
 	return tsgenmeta.MethodMeta{
 		ArgNames: []string{"uiContext", "tabId", "name"},
@@ -192,7 +122,7 @@ func (svc *ObjectService) DeleteBlock(uiContext waveobj.UIContext, blockId strin
 	ctx, cancelFn := context.WithTimeout(context.Background(), DefaultTimeout)
 	defer cancelFn()
 	ctx = waveobj.ContextWithUpdates(ctx)
-	err := wcore.DeleteBlock(ctx, uiContext.ActiveTabId, blockId)
+	err := wcore.DeleteBlock(ctx, blockId, true)
 	if err != nil {
 		return nil, fmt.Errorf("error deleting block: %w", err)
 	}
@@ -213,9 +143,9 @@ func (svc *ObjectService) UpdateObjectMeta(uiContext waveobj.UIContext, orefStr 
 	if err != nil {
 		return nil, fmt.Errorf("error parsing object reference: %w", err)
 	}
-	err = wstore.UpdateObjectMeta(ctx, *oref, meta)
+	err = wstore.UpdateObjectMeta(ctx, *oref, meta, false)
 	if err != nil {
-		return nil, fmt.Errorf("error updateing %q meta: %w", orefStr, err)
+		return nil, fmt.Errorf("error updating %q meta: %w", orefStr, err)
 	}
 	return waveobj.ContextGetUpdatesRtn(ctx), nil
 }
@@ -244,6 +174,10 @@ func (svc *ObjectService) UpdateObject(uiContext waveobj.UIContext, waveObj wave
 	err = wstore.DBUpdate(ctx, waveObj)
 	if err != nil {
 		return nil, fmt.Errorf("error updating object: %w", err)
+	}
+	if (waveObj.GetOType() == waveobj.OType_Workspace) && (waveObj.(*waveobj.Workspace).Name != "") {
+		wps.Broker.Publish(wps.WaveEvent{
+			Event: wps.Event_WorkspaceUpdate})
 	}
 	if returnUpdates {
 		return waveobj.ContextGetUpdatesRtn(ctx), nil

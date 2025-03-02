@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package wshserver
@@ -12,30 +12,45 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/skratchdot/open-golang/open"
 	"github.com/wavetermdev/waveterm/pkg/blockcontroller"
+	"github.com/wavetermdev/waveterm/pkg/blocklogger"
 	"github.com/wavetermdev/waveterm/pkg/filestore"
+	"github.com/wavetermdev/waveterm/pkg/genconn"
+	"github.com/wavetermdev/waveterm/pkg/panichandler"
 	"github.com/wavetermdev/waveterm/pkg/remote"
+	"github.com/wavetermdev/waveterm/pkg/remote/awsconn"
 	"github.com/wavetermdev/waveterm/pkg/remote/conncontroller"
+	"github.com/wavetermdev/waveterm/pkg/remote/fileshare"
+	"github.com/wavetermdev/waveterm/pkg/suggestion"
+	"github.com/wavetermdev/waveterm/pkg/telemetry"
+	"github.com/wavetermdev/waveterm/pkg/telemetry/telemetrydata"
+	"github.com/wavetermdev/waveterm/pkg/util/envutil"
+	"github.com/wavetermdev/waveterm/pkg/util/iochan/iochantypes"
+	"github.com/wavetermdev/waveterm/pkg/util/iterfn"
+	"github.com/wavetermdev/waveterm/pkg/util/shellutil"
+	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
+	"github.com/wavetermdev/waveterm/pkg/util/wavefileutil"
 	"github.com/wavetermdev/waveterm/pkg/waveai"
+	"github.com/wavetermdev/waveterm/pkg/wavebase"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
+	"github.com/wavetermdev/waveterm/pkg/wcloud"
 	"github.com/wavetermdev/waveterm/pkg/wconfig"
 	"github.com/wavetermdev/waveterm/pkg/wcore"
-	"github.com/wavetermdev/waveterm/pkg/wlayout"
 	"github.com/wavetermdev/waveterm/pkg/wps"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc"
 	"github.com/wavetermdev/waveterm/pkg/wshutil"
+	"github.com/wavetermdev/waveterm/pkg/wsl"
+	"github.com/wavetermdev/waveterm/pkg/wslconn"
 	"github.com/wavetermdev/waveterm/pkg/wstore"
 )
 
-const SimpleId_This = "this"
-const SimpleId_Tab = "tab"
-
-var SimpleId_BlockNum_Regex = regexp.MustCompile(`^\d+$`)
+var InvalidWslDistroNames = []string{"docker-desktop", "docker-desktop-data"}
 
 type WshServer struct{}
 
@@ -43,11 +58,22 @@ func (*WshServer) WshServerImpl() {}
 
 var WshServerImpl = WshServer{}
 
+// TODO remove this after implementing in multiproxy, just for wsl
+func (ws *WshServer) AuthenticateTokenCommand(ctx context.Context, data wshrpc.CommandAuthenticateTokenData) (wshrpc.CommandAuthenticateRtnData, error) {
+	entry := shellutil.GetAndRemoveTokenSwapEntry(data.Token)
+	if entry == nil {
+		return wshrpc.CommandAuthenticateRtnData{}, fmt.Errorf("invalid token")
+	}
+	rtn := wshrpc.CommandAuthenticateRtnData{
+		Env:            entry.Env,
+		InitScriptText: entry.ScriptText,
+	}
+	return rtn, nil
+}
+
 func (ws *WshServer) TestCommand(ctx context.Context, data string) error {
 	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("panic in TestCommand: %v", r)
-		}
+		panichandler.PanicHandler("TestCommand", recover())
 	}()
 	rpcSource := wshutil.GetRpcSourceFromContext(ctx)
 	log.Printf("TEST src:%s | %s\n", rpcSource, data)
@@ -64,6 +90,9 @@ func (ws *WshServer) MessageCommand(ctx context.Context, data wshrpc.CommandMess
 func (ws *WshServer) StreamTestCommand(ctx context.Context) chan wshrpc.RespOrErrorUnion[int] {
 	rtn := make(chan wshrpc.RespOrErrorUnion[int])
 	go func() {
+		defer func() {
+			panichandler.PanicHandler("StreamTestCommand", recover())
+		}()
 		for i := 1; i <= 5; i++ {
 			rtn <- wshrpc.RespOrErrorUnion[int]{Response: i}
 			time.Sleep(1 * time.Second)
@@ -73,7 +102,7 @@ func (ws *WshServer) StreamTestCommand(ctx context.Context) chan wshrpc.RespOrEr
 	return rtn
 }
 
-func (ws *WshServer) StreamWaveAiCommand(ctx context.Context, request wshrpc.OpenAiStreamRequest) chan wshrpc.RespOrErrorUnion[wshrpc.OpenAIPacketType] {
+func (ws *WshServer) StreamWaveAiCommand(ctx context.Context, request wshrpc.WaveAIStreamRequest) chan wshrpc.RespOrErrorUnion[wshrpc.WaveAIPacketType] {
 	return waveai.RunAICommand(ctx, request)
 }
 
@@ -86,7 +115,7 @@ func MakePlotData(ctx context.Context, blockId string) error {
 	if viewName != "cpuplot" && viewName != "sysinfo" {
 		return fmt.Errorf("invalid view type: %s", viewName)
 	}
-	return filestore.WFS.MakeFile(ctx, blockId, "cpuplotdata", nil, filestore.FileOptsType{})
+	return filestore.WFS.MakeFile(ctx, blockId, "cpuplotdata", nil, wshrpc.FileOpts{})
 }
 
 func SavePlotData(ctx context.Context, blockId string, history string) error {
@@ -120,9 +149,9 @@ func (ws *WshServer) GetMetaCommand(ctx context.Context, data wshrpc.CommandGetM
 }
 
 func (ws *WshServer) SetMetaCommand(ctx context.Context, data wshrpc.CommandSetMetaData) error {
-	log.Printf("SETMETA: %s | %v\n", data.ORef, data.Meta)
+	log.Printf("SetMetaCommand: %s | %v\n", data.ORef, data.Meta)
 	oref := data.ORef
-	err := wstore.UpdateObjectMeta(ctx, oref, data.Meta)
+	err := wstore.UpdateObjectMeta(ctx, oref, data.Meta, false)
 	if err != nil {
 		return fmt.Errorf("error updating object meta: %w", err)
 	}
@@ -151,69 +180,25 @@ func sendWaveObjUpdate(oref waveobj.ORef) {
 	})
 }
 
-func resolveSimpleId(ctx context.Context, data wshrpc.CommandResolveIdsData, simpleId string) (*waveobj.ORef, error) {
-	if simpleId == SimpleId_This {
-		if data.BlockId == "" {
-			return nil, fmt.Errorf("no blockid in request")
-		}
-		return &waveobj.ORef{OType: waveobj.OType_Block, OID: data.BlockId}, nil
-	}
-	if simpleId == SimpleId_Tab {
-		if data.BlockId == "" {
-			return nil, fmt.Errorf("no blockid in request")
-		}
-		tabId, err := wstore.DBFindTabForBlockId(ctx, data.BlockId)
-		if err != nil {
-			return nil, fmt.Errorf("error finding tab: %v", err)
-		}
-		return &waveobj.ORef{OType: waveobj.OType_Tab, OID: tabId}, nil
-	}
-	blockNum, err := strconv.Atoi(simpleId)
-	if err == nil {
-		tabId, err := wstore.DBFindTabForBlockId(ctx, data.BlockId)
-		if err != nil {
-			return nil, fmt.Errorf("error finding tab for blockid %s: %w", data.BlockId, err)
-		}
-
-		tab, err := wstore.DBGet[*waveobj.Tab](ctx, tabId)
-		if err != nil {
-			return nil, fmt.Errorf("error retrieving tab %s: %w", tabId, err)
-		}
-
-		layout, err := wstore.DBGet[*waveobj.LayoutState](ctx, tab.LayoutState)
-		if err != nil {
-			return nil, fmt.Errorf("error retrieving layout state %s: %w", tab.LayoutState, err)
-		}
-
-		if layout.LeafOrder == nil {
-			return nil, fmt.Errorf("could not resolve block num %v, leaf order is empty", blockNum)
-		}
-
-		leafIndex := blockNum - 1 // block nums are 1-indexed, we need the 0-indexed version
-		if len(*layout.LeafOrder) <= leafIndex {
-			return nil, fmt.Errorf("could not find a node in the layout matching blockNum %v", blockNum)
-		}
-		leafEntry := (*layout.LeafOrder)[leafIndex]
-		return &waveobj.ORef{OType: waveobj.OType_Block, OID: leafEntry.BlockId}, nil
-	} else if strings.Contains(simpleId, ":") {
-		rtn, err := waveobj.ParseORef(simpleId)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing simple id: %w", err)
-		}
-		return &rtn, nil
-	}
-	return wstore.DBResolveEasyOID(ctx, simpleId)
-}
-
 func (ws *WshServer) ResolveIdsCommand(ctx context.Context, data wshrpc.CommandResolveIdsData) (wshrpc.CommandResolveIdsRtnData, error) {
 	rtn := wshrpc.CommandResolveIdsRtnData{}
 	rtn.ResolvedIds = make(map[string]waveobj.ORef)
+	var firstErr error
 	for _, simpleId := range data.Ids {
 		oref, err := resolveSimpleId(ctx, data, simpleId)
-		if err != nil || oref == nil {
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if oref == nil {
 			continue
 		}
 		rtn.ResolvedIds[simpleId] = *oref
+	}
+	if firstErr != nil && len(data.Ids) == 1 {
+		return rtn, firstErr
 	}
 	return rtn, nil
 }
@@ -225,26 +210,77 @@ func (ws *WshServer) CreateBlockCommand(ctx context.Context, data wshrpc.Command
 	if err != nil {
 		return nil, fmt.Errorf("error creating block: %w", err)
 	}
-	blockRef := &waveobj.ORef{OType: waveobj.OType_Block, OID: blockData.OID}
-	windowId, err := wstore.DBFindWindowForTabId(ctx, tabId)
-	if err != nil {
-		return nil, fmt.Errorf("error finding window for tab: %w", err)
+	var layoutAction *waveobj.LayoutActionData
+	if data.TargetBlockId != "" {
+		switch data.TargetAction {
+		case "replace":
+			layoutAction = &waveobj.LayoutActionData{
+				ActionType:    wcore.LayoutActionDataType_Replace,
+				TargetBlockId: data.TargetBlockId,
+				BlockId:       blockData.OID,
+				Focused:       true,
+			}
+			err = wcore.DeleteBlock(ctx, data.TargetBlockId, false)
+			if err != nil {
+				return nil, fmt.Errorf("error deleting block (trying to do block replace): %w", err)
+			}
+		case "splitright":
+			layoutAction = &waveobj.LayoutActionData{
+				ActionType:    wcore.LayoutActionDataType_SplitHorizontal,
+				BlockId:       blockData.OID,
+				TargetBlockId: data.TargetBlockId,
+				Position:      "after",
+			}
+		case "splitleft":
+			layoutAction = &waveobj.LayoutActionData{
+				ActionType:    wcore.LayoutActionDataType_SplitHorizontal,
+				BlockId:       blockData.OID,
+				TargetBlockId: data.TargetBlockId,
+				Position:      "before",
+			}
+		case "splitup":
+			layoutAction = &waveobj.LayoutActionData{
+				ActionType:    wcore.LayoutActionDataType_SplitVertical,
+				BlockId:       blockData.OID,
+				TargetBlockId: data.TargetBlockId,
+				Position:      "before",
+			}
+		case "splitdown":
+			layoutAction = &waveobj.LayoutActionData{
+				ActionType:    wcore.LayoutActionDataType_SplitVertical,
+				BlockId:       blockData.OID,
+				TargetBlockId: data.TargetBlockId,
+				Position:      "after",
+			}
+		default:
+			return nil, fmt.Errorf("invalid target action: %s", data.TargetAction)
+		}
+	} else {
+		layoutAction = &waveobj.LayoutActionData{
+			ActionType: wcore.LayoutActionDataType_Insert,
+			BlockId:    blockData.OID,
+			Magnified:  data.Magnified,
+			Ephemeral:  data.Ephemeral,
+			Focused:    true,
+		}
 	}
-	if windowId == "" {
-		return nil, fmt.Errorf("no window found for tab")
-	}
-	err = wlayout.QueueLayoutActionForTab(ctx, tabId, waveobj.LayoutActionData{
-		ActionType: wlayout.LayoutActionDataType_Insert,
-		BlockId:    blockRef.OID,
-		Magnified:  data.Magnified,
-		Focused:    true,
-	})
+	err = wcore.QueueLayoutActionForTab(ctx, tabId, *layoutAction)
 	if err != nil {
 		return nil, fmt.Errorf("error queuing layout action: %w", err)
 	}
 	updates := waveobj.ContextGetUpdatesRtn(ctx)
 	wps.Broker.SendUpdateEvents(updates)
-	return &waveobj.ORef{OType: waveobj.OType_Block, OID: blockRef.OID}, nil
+	return &waveobj.ORef{OType: waveobj.OType_Block, OID: blockData.OID}, nil
+}
+
+func (ws *WshServer) CreateSubBlockCommand(ctx context.Context, data wshrpc.CommandCreateSubBlockData) (*waveobj.ORef, error) {
+	parentBlockId := data.ParentBlockId
+	blockData, err := wcore.CreateSubBlock(ctx, parentBlockId, data.BlockDef)
+	if err != nil {
+		return nil, fmt.Errorf("error creating block: %w", err)
+	}
+	blockRef := &waveobj.ORef{OType: waveobj.OType_Block, OID: blockData.OID}
+	return blockRef, nil
 }
 
 func (ws *WshServer) SetViewCommand(ctx context.Context, data wshrpc.CommandBlockSetViewData) error {
@@ -274,10 +310,9 @@ func (ws *WshServer) ControllerStopCommand(ctx context.Context, blockId string) 
 }
 
 func (ws *WshServer) ControllerResyncCommand(ctx context.Context, data wshrpc.CommandControllerResyncData) error {
-	if data.ForceRestart {
-		blockcontroller.StopBlockController(data.BlockId)
-	}
-	return blockcontroller.ResyncController(ctx, data.TabId, data.BlockId, data.RtOpts)
+	ctx = genconn.ContextWithConnData(ctx, data.BlockId)
+	ctx = termCtxWithLogBlockId(ctx, data.BlockId)
+	return blockcontroller.ResyncController(ctx, data.TabId, data.BlockId, data.RtOpts, data.ForceRestart)
 }
 
 func (ws *WshServer) ControllerInputCommand(ctx context.Context, data wshrpc.CommandBlockInputData) error {
@@ -300,63 +335,82 @@ func (ws *WshServer) ControllerInputCommand(ctx context.Context, data wshrpc.Com
 	return bc.SendInput(inputUnion)
 }
 
-func (ws *WshServer) FileWriteCommand(ctx context.Context, data wshrpc.CommandFileData) error {
-	dataBuf, err := base64.StdEncoding.DecodeString(data.Data64)
+func (ws *WshServer) ControllerAppendOutputCommand(ctx context.Context, data wshrpc.CommandControllerAppendOutputData) error {
+	outputBuf := make([]byte, base64.StdEncoding.DecodedLen(len(data.Data64)))
+	nw, err := base64.StdEncoding.Decode(outputBuf, []byte(data.Data64))
 	if err != nil {
-		return fmt.Errorf("error decoding data64: %w", err)
+		return fmt.Errorf("error decoding output data: %w", err)
 	}
-	err = filestore.WFS.WriteFile(ctx, data.ZoneId, data.FileName, dataBuf)
+	err = blockcontroller.HandleAppendBlockFile(data.BlockId, wavebase.BlockFile_Term, outputBuf[:nw])
 	if err != nil {
-		return fmt.Errorf("error writing to blockfile: %w", err)
+		return fmt.Errorf("error appending to block file: %w", err)
 	}
-	wps.Broker.Publish(wps.WaveEvent{
-		Event:  wps.Event_BlockFile,
-		Scopes: []string{waveobj.MakeORef(waveobj.OType_Block, data.ZoneId).String()},
-		Data: &wps.WSFileEventData{
-			ZoneId:   data.ZoneId,
-			FileName: data.FileName,
-			FileOp:   wps.FileOp_Invalidate,
-		},
-	})
 	return nil
 }
 
-func (ws *WshServer) FileReadCommand(ctx context.Context, data wshrpc.CommandFileData) (string, error) {
-	_, dataBuf, err := filestore.WFS.ReadFile(ctx, data.ZoneId, data.FileName)
+func (ws *WshServer) FileCreateCommand(ctx context.Context, data wshrpc.FileData) error {
+	data.Data64 = ""
+	err := fileshare.PutFile(ctx, data)
 	if err != nil {
-		return "", fmt.Errorf("error reading blockfile: %w", err)
+		return fmt.Errorf("error creating file: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(dataBuf), nil
+	return nil
 }
 
-func (ws *WshServer) FileAppendCommand(ctx context.Context, data wshrpc.CommandFileData) error {
-	dataBuf, err := base64.StdEncoding.DecodeString(data.Data64)
-	if err != nil {
-		return fmt.Errorf("error decoding data64: %w", err)
-	}
-	err = filestore.WFS.AppendData(ctx, data.ZoneId, data.FileName, dataBuf)
-	if err != nil {
-		return fmt.Errorf("error appending to blockfile: %w", err)
-	}
-	wps.Broker.Publish(wps.WaveEvent{
-		Event:  wps.Event_BlockFile,
-		Scopes: []string{waveobj.MakeORef(waveobj.OType_Block, data.ZoneId).String()},
-		Data: &wps.WSFileEventData{
-			ZoneId:   data.ZoneId,
-			FileName: data.FileName,
-			FileOp:   wps.FileOp_Append,
-			Data64:   base64.StdEncoding.EncodeToString(dataBuf),
-		},
-	})
-	return nil
+func (ws *WshServer) FileMkdirCommand(ctx context.Context, data wshrpc.FileData) error {
+	return fileshare.Mkdir(ctx, data.Info.Path)
+}
+
+func (ws *WshServer) FileDeleteCommand(ctx context.Context, data wshrpc.CommandDeleteFileData) error {
+	return fileshare.Delete(ctx, data)
+}
+
+func (ws *WshServer) FileInfoCommand(ctx context.Context, data wshrpc.FileData) (*wshrpc.FileInfo, error) {
+	return fileshare.Stat(ctx, data.Info.Path)
+}
+
+func (ws *WshServer) FileListCommand(ctx context.Context, data wshrpc.FileListData) ([]*wshrpc.FileInfo, error) {
+	return fileshare.ListEntries(ctx, data.Path, data.Opts)
+}
+
+func (ws *WshServer) FileListStreamCommand(ctx context.Context, data wshrpc.FileListData) <-chan wshrpc.RespOrErrorUnion[wshrpc.CommandRemoteListEntriesRtnData] {
+	return fileshare.ListEntriesStream(ctx, data.Path, data.Opts)
+}
+
+func (ws *WshServer) FileWriteCommand(ctx context.Context, data wshrpc.FileData) error {
+	return fileshare.PutFile(ctx, data)
+}
+
+func (ws *WshServer) FileReadCommand(ctx context.Context, data wshrpc.FileData) (*wshrpc.FileData, error) {
+	return fileshare.Read(ctx, data)
+}
+
+func (ws *WshServer) FileReadStreamCommand(ctx context.Context, data wshrpc.FileData) <-chan wshrpc.RespOrErrorUnion[wshrpc.FileData] {
+	return fileshare.ReadStream(ctx, data)
+}
+
+func (ws *WshServer) FileCopyCommand(ctx context.Context, data wshrpc.CommandFileCopyData) error {
+	return fileshare.Copy(ctx, data)
+}
+
+func (ws *WshServer) FileMoveCommand(ctx context.Context, data wshrpc.CommandFileCopyData) error {
+	return fileshare.Move(ctx, data)
+}
+
+func (ws *WshServer) FileStreamTarCommand(ctx context.Context, data wshrpc.CommandRemoteStreamTarData) <-chan wshrpc.RespOrErrorUnion[iochantypes.Packet] {
+	return fileshare.ReadTarStream(ctx, data)
+}
+
+func (ws *WshServer) FileAppendCommand(ctx context.Context, data wshrpc.FileData) error {
+	return fileshare.Append(ctx, data)
 }
 
 func (ws *WshServer) FileAppendIJsonCommand(ctx context.Context, data wshrpc.CommandAppendIJsonData) error {
 	tryCreate := true
-	if data.FileName == blockcontroller.BlockFile_Html && tryCreate {
-		err := filestore.WFS.MakeFile(ctx, data.ZoneId, data.FileName, nil, filestore.FileOptsType{MaxSize: blockcontroller.DefaultHtmlMaxFileSize, IJson: true})
+	if data.FileName == wavebase.BlockFile_VDom && tryCreate {
+		err := filestore.WFS.MakeFile(ctx, data.ZoneId, data.FileName, nil, wshrpc.FileOpts{MaxSize: blockcontroller.DefaultHtmlMaxFileSize, IJson: true})
 		if err != nil && err != fs.ErrExist {
-			return fmt.Errorf("error creating blockfile[html]: %w", err)
+			return fmt.Errorf("error creating blockfile[vdom]: %w", err)
 		}
 	}
 	err := filestore.WFS.AppendIJson(ctx, data.ZoneId, data.FileName, data.Data)
@@ -376,6 +430,28 @@ func (ws *WshServer) FileAppendIJsonCommand(ctx context.Context, data wshrpc.Com
 	return nil
 }
 
+func (ws *WshServer) FileJoinCommand(ctx context.Context, paths []string) (*wshrpc.FileInfo, error) {
+	if len(paths) < 2 {
+		if len(paths) == 0 {
+			return nil, fmt.Errorf("no paths provided")
+		}
+		return fileshare.Stat(ctx, paths[0])
+	}
+	return fileshare.Join(ctx, paths[0], paths[1:]...)
+}
+
+func (ws *WshServer) FileShareCapabilityCommand(ctx context.Context, path string) (wshrpc.FileShareCapability, error) {
+	return fileshare.GetCapability(ctx, path)
+}
+
+func (ws *WshServer) DeleteSubBlockCommand(ctx context.Context, data wshrpc.CommandDeleteBlockData) error {
+	err := wcore.DeleteBlock(ctx, data.BlockId, false)
+	if err != nil {
+		return fmt.Errorf("error deleting block: %w", err)
+	}
+	return nil
+}
+
 func (ws *WshServer) DeleteBlockCommand(ctx context.Context, data wshrpc.CommandDeleteBlockData) error {
 	ctx = waveobj.ContextWithUpdates(ctx)
 	tabId, err := wstore.DBFindTabForBlockId(ctx, data.BlockId)
@@ -385,24 +461,24 @@ func (ws *WshServer) DeleteBlockCommand(ctx context.Context, data wshrpc.Command
 	if tabId == "" {
 		return fmt.Errorf("no tab found for block")
 	}
-	windowId, err := wstore.DBFindWindowForTabId(ctx, tabId)
-	if err != nil {
-		return fmt.Errorf("error finding window for tab: %w", err)
-	}
-	if windowId == "" {
-		return fmt.Errorf("no window found for tab")
-	}
-	err = wcore.DeleteBlock(ctx, tabId, data.BlockId)
+	err = wcore.DeleteBlock(ctx, data.BlockId, true)
 	if err != nil {
 		return fmt.Errorf("error deleting block: %w", err)
 	}
-	wlayout.QueueLayoutActionForTab(ctx, tabId, waveobj.LayoutActionData{
-		ActionType: wlayout.LayoutActionDataType_Remove,
+	wcore.QueueLayoutActionForTab(ctx, tabId, waveobj.LayoutActionData{
+		ActionType: wcore.LayoutActionDataType_Remove,
 		BlockId:    data.BlockId,
 	})
 	updates := waveobj.ContextGetUpdatesRtn(ctx)
 	wps.Broker.SendUpdateEvents(updates)
 	return nil
+}
+
+func (ws *WshServer) WaitForRouteCommand(ctx context.Context, data wshrpc.CommandWaitForRouteData) (bool, error) {
+	waitCtx, cancelFn := context.WithTimeout(ctx, time.Duration(data.WaitMs)*time.Millisecond)
+	defer cancelFn()
+	err := wshutil.DefaultRouter.WaitForRegister(waitCtx, data.RouteId)
+	return err == nil, nil
 }
 
 func (ws *WshServer) EventRecvCommand(ctx context.Context, data wps.WaveEvent) error {
@@ -422,7 +498,6 @@ func (ws *WshServer) EventPublishCommand(ctx context.Context, data wps.WaveEvent
 }
 
 func (ws *WshServer) EventSubCommand(ctx context.Context, data wps.SubscriptionRequest) error {
-	log.Printf("EventSubCommand: %v\n", data)
 	rpcSource := wshutil.GetRpcSourceFromContext(ctx)
 	if rpcSource == "" {
 		return fmt.Errorf("no rpc source set")
@@ -454,9 +529,19 @@ func (ws *WshServer) EventReadHistoryCommand(ctx context.Context, data wshrpc.Co
 	return events, nil
 }
 
-func (ws *WshServer) SetConfigCommand(ctx context.Context, data wconfig.MetaSettingsType) error {
+func (ws *WshServer) SetConfigCommand(ctx context.Context, data wshrpc.MetaSettingsType) error {
 	log.Printf("SETCONFIG: %v\n", data)
 	return wconfig.SetBaseConfigValue(data.MetaMapType)
+}
+
+func (ws *WshServer) SetConnectionsConfigCommand(ctx context.Context, data wshrpc.ConnConfigRequest) error {
+	log.Printf("SET CONNECTIONS CONFIG: %v\n", data)
+	return wconfig.SetConnectionsConfigValue(data.Host, data.MetaMapType)
+}
+
+func (ws *WshServer) GetFullConfigCommand(ctx context.Context) (wconfig.FullConfigType, error) {
+	watcher := wconfig.GetWatcher()
+	return watcher.GetFullConfig(), nil
 }
 
 func (ws *WshServer) ConnStatusCommand(ctx context.Context) ([]wshrpc.ConnStatus, error) {
@@ -464,48 +549,227 @@ func (ws *WshServer) ConnStatusCommand(ctx context.Context) ([]wshrpc.ConnStatus
 	return rtn, nil
 }
 
-func (ws *WshServer) ConnEnsureCommand(ctx context.Context, connName string) error {
-	return conncontroller.EnsureConnection(ctx, connName)
+func (ws *WshServer) WslStatusCommand(ctx context.Context) ([]wshrpc.ConnStatus, error) {
+	rtn := wslconn.GetAllConnStatus()
+	return rtn, nil
+}
+
+func termCtxWithLogBlockId(ctx context.Context, logBlockId string) context.Context {
+	if logBlockId == "" {
+		return ctx
+	}
+	block, err := wstore.DBMustGet[*waveobj.Block](ctx, logBlockId)
+	if err != nil {
+		return ctx
+	}
+	connDebug := block.Meta.GetString(waveobj.MetaKey_TermConnDebug, "")
+	if connDebug == "" {
+		return ctx
+	}
+	return blocklogger.ContextWithLogBlockId(ctx, logBlockId, connDebug == "debug")
+}
+
+func (ws *WshServer) ConnEnsureCommand(ctx context.Context, data wshrpc.ConnExtData) error {
+	// TODO: if we add proper wsh connections via aws, we'll need to handle that here
+	if strings.HasPrefix(data.ConnName, "aws:") {
+		profiles := awsconn.ParseProfiles()
+		for profile := range profiles {
+			if strings.HasPrefix(data.ConnName, profile) {
+				return nil
+			}
+		}
+	}
+	ctx = genconn.ContextWithConnData(ctx, data.LogBlockId)
+	ctx = termCtxWithLogBlockId(ctx, data.LogBlockId)
+	if strings.HasPrefix(data.ConnName, "wsl://") {
+		distroName := strings.TrimPrefix(data.ConnName, "wsl://")
+		return wslconn.EnsureConnection(ctx, distroName)
+	}
+	return conncontroller.EnsureConnection(ctx, data.ConnName)
 }
 
 func (ws *WshServer) ConnDisconnectCommand(ctx context.Context, connName string) error {
+	// TODO: if we add proper wsh connections via aws, we'll need to handle that here
+	if strings.HasPrefix(connName, "aws:") {
+		return nil
+	}
+	if strings.HasPrefix(connName, "wsl://") {
+		distroName := strings.TrimPrefix(connName, "wsl://")
+		conn := wslconn.GetWslConn(distroName)
+		if conn == nil {
+			return fmt.Errorf("distro not found: %s", connName)
+		}
+		return conn.Close()
+	}
 	connOpts, err := remote.ParseOpts(connName)
 	if err != nil {
 		return fmt.Errorf("error parsing connection name: %w", err)
 	}
-	conn := conncontroller.GetConn(ctx, connOpts, false)
+	conn := conncontroller.GetConn(connOpts)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connName)
 	}
 	return conn.Close()
 }
 
-func (ws *WshServer) ConnConnectCommand(ctx context.Context, connName string) error {
+func (ws *WshServer) ConnConnectCommand(ctx context.Context, connRequest wshrpc.ConnRequest) error {
+	// TODO: if we add proper wsh connections via aws, we'll need to handle that here
+	if strings.HasPrefix(connRequest.Host, "aws:") {
+		return nil
+	}
+	ctx = genconn.ContextWithConnData(ctx, connRequest.LogBlockId)
+	ctx = termCtxWithLogBlockId(ctx, connRequest.LogBlockId)
+	connName := connRequest.Host
+	if strings.HasPrefix(connName, "wsl://") {
+		distroName := strings.TrimPrefix(connName, "wsl://")
+		conn := wslconn.GetWslConn(distroName)
+		if conn == nil {
+			return fmt.Errorf("connection not found: %s", connName)
+		}
+		return conn.Connect(ctx)
+	}
 	connOpts, err := remote.ParseOpts(connName)
 	if err != nil {
 		return fmt.Errorf("error parsing connection name: %w", err)
 	}
-	conn := conncontroller.GetConn(ctx, connOpts, false)
+	conn := conncontroller.GetConn(connOpts)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connName)
 	}
-	return conn.Connect(ctx)
+	return conn.Connect(ctx, &connRequest.Keywords)
 }
 
-func (ws *WshServer) ConnReinstallWshCommand(ctx context.Context, connName string) error {
+func (ws *WshServer) ConnReinstallWshCommand(ctx context.Context, data wshrpc.ConnExtData) error {
+	// TODO: if we add proper wsh connections via aws, we'll need to handle that here
+	if strings.HasPrefix(data.ConnName, "aws:") {
+		return nil
+	}
+	ctx = genconn.ContextWithConnData(ctx, data.LogBlockId)
+	ctx = termCtxWithLogBlockId(ctx, data.LogBlockId)
+	connName := data.ConnName
+	if strings.HasPrefix(connName, "wsl://") {
+		distroName := strings.TrimPrefix(connName, "wsl://")
+		conn := wslconn.GetWslConn(distroName)
+		if conn == nil {
+			return fmt.Errorf("connection not found: %s", connName)
+		}
+		return conn.InstallWsh(ctx, "")
+	}
 	connOpts, err := remote.ParseOpts(connName)
 	if err != nil {
 		return fmt.Errorf("error parsing connection name: %w", err)
 	}
-	conn := conncontroller.GetConn(ctx, connOpts, false)
+	conn := conncontroller.GetConn(connOpts)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connName)
 	}
-	return conn.CheckAndInstallWsh(ctx, connName, &conncontroller.WshInstallOpts{Force: true, NoUserPrompt: true})
+	return conn.InstallWsh(ctx, "")
+}
+
+func (ws *WshServer) ConnUpdateWshCommand(ctx context.Context, remoteInfo wshrpc.RemoteInfo) (bool, error) {
+	handler := wshutil.GetRpcResponseHandlerFromContext(ctx)
+	if handler == nil {
+		return false, fmt.Errorf("could not determine handler from context")
+	}
+	connName := handler.GetRpcContext().Conn
+	if connName == "" {
+		return false, fmt.Errorf("invalid remote info: missing connection name")
+	}
+
+	log.Printf("checking wsh version for connection %s (current: %s)", connName, remoteInfo.ClientVersion)
+	upToDate, _, _, err := conncontroller.IsWshVersionUpToDate(ctx, remoteInfo.ClientVersion)
+	if err != nil {
+		return false, fmt.Errorf("unable to compare wsh version: %w", err)
+	}
+	if upToDate {
+		// no need to update
+		log.Printf("wsh is already up to date for connection %s", connName)
+		return false, nil
+	}
+
+	// todo: need to add user input code here for validation
+
+	if strings.HasPrefix(connName, "wsl://") {
+		return false, fmt.Errorf("connupdatewshcommand is not supported for wsl connections")
+	}
+	connOpts, err := remote.ParseOpts(connName)
+	if err != nil {
+		return false, fmt.Errorf("error parsing connection name: %w", err)
+	}
+	conn := conncontroller.GetConn(connOpts)
+	if conn == nil {
+		return false, fmt.Errorf("connection not found: %s", connName)
+	}
+	err = conn.UpdateWsh(ctx, connName, &remoteInfo)
+	if err != nil {
+		return false, fmt.Errorf("wsh update failed for connection %s: %w", connName, err)
+	}
+
+	// todo: need to add code for modifying configs?
+	return true, nil
 }
 
 func (ws *WshServer) ConnListCommand(ctx context.Context) ([]string, error) {
 	return conncontroller.GetConnectionsList()
+}
+
+func (ws *WshServer) ConnListAWSCommand(ctx context.Context) ([]string, error) {
+	profilesMap := awsconn.ParseProfiles()
+	return iterfn.MapKeysToSorted(profilesMap), nil
+}
+
+func (ws *WshServer) WslListCommand(ctx context.Context) ([]string, error) {
+	distros, err := wsl.RegisteredDistros(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var distroNames []string
+	for _, distro := range distros {
+		distroName := distro.Name()
+		if utilfn.ContainsStr(InvalidWslDistroNames, distroName) {
+			continue
+		}
+		distroNames = append(distroNames, distroName)
+	}
+	return distroNames, nil
+}
+
+func (ws *WshServer) WslDefaultDistroCommand(ctx context.Context) (string, error) {
+	distro, ok, err := wsl.DefaultDistro(ctx)
+	if err != nil {
+		return "", fmt.Errorf("unable to determine default distro: %w", err)
+	}
+	if !ok {
+		return "", fmt.Errorf("unable to determine default distro")
+	}
+	return distro.Name(), nil
+}
+
+/**
+ * Dismisses the WshFail Command in runtime memory on the backend
+ */
+func (ws *WshServer) DismissWshFailCommand(ctx context.Context, connName string) error {
+	if strings.HasPrefix(connName, "wsl://") {
+		distroName := strings.TrimPrefix(connName, "wsl://")
+		conn := wslconn.GetWslConn(distroName)
+		if conn == nil {
+			return fmt.Errorf("connection not found: %s", connName)
+		}
+		conn.ClearWshError()
+		conn.FireConnChangeEvent()
+		return nil
+	}
+	opts, err := remote.ParseOpts(connName)
+	if err != nil {
+		return err
+	}
+	conn := conncontroller.GetConn(opts)
+	if conn == nil {
+		return fmt.Errorf("connection %s not found", connName)
+	}
+	conn.ClearWshError()
+	conn.FireConnChangeEvent()
+	return nil
 }
 
 func (ws *WshServer) BlockInfoCommand(ctx context.Context, blockId string) (*wshrpc.BlockInfoData, error) {
@@ -517,14 +781,195 @@ func (ws *WshServer) BlockInfoCommand(ctx context.Context, blockId string) (*wsh
 	if err != nil {
 		return nil, fmt.Errorf("error finding tab for block: %w", err)
 	}
-	windowId, err := wstore.DBFindWindowForTabId(ctx, tabId)
+	workspaceId, err := wstore.DBFindWorkspaceForTabId(ctx, tabId)
 	if err != nil {
 		return nil, fmt.Errorf("error finding window for tab: %w", err)
 	}
+	fileList, err := filestore.WFS.ListFiles(ctx, blockId)
+	if err != nil {
+		return nil, fmt.Errorf("error listing blockfiles: %w", err)
+	}
+	fileInfoList := wavefileutil.WaveFileListToFileInfoList(fileList)
 	return &wshrpc.BlockInfoData{
-		BlockId:  blockId,
-		TabId:    tabId,
-		WindowId: windowId,
-		Meta:     blockData.Meta,
+		BlockId:     blockId,
+		TabId:       tabId,
+		WorkspaceId: workspaceId,
+		Block:       blockData,
+		Files:       fileInfoList,
 	}, nil
+}
+
+func (ws *WshServer) WaveInfoCommand(ctx context.Context) (*wshrpc.WaveInfoData, error) {
+	client, err := wstore.DBGetSingleton[*waveobj.Client](ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error getting client: %w", err)
+	}
+	return &wshrpc.WaveInfoData{
+		Version:   wavebase.WaveVersion,
+		ClientId:  client.OID,
+		BuildTime: wavebase.BuildTime,
+		ConfigDir: wavebase.GetWaveConfigDir(),
+		DataDir:   wavebase.GetWaveDataDir(),
+	}, nil
+}
+
+func (ws *WshServer) WorkspaceListCommand(ctx context.Context) ([]wshrpc.WorkspaceInfoData, error) {
+	workspaceList, err := wcore.ListWorkspaces(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error listing workspaces: %w", err)
+	}
+	var rtn []wshrpc.WorkspaceInfoData
+	for _, workspaceEntry := range workspaceList {
+		workspaceData, err := wcore.GetWorkspace(ctx, workspaceEntry.WorkspaceId)
+		if err != nil {
+			return nil, fmt.Errorf("error getting workspace: %w", err)
+		}
+		rtn = append(rtn, wshrpc.WorkspaceInfoData{
+			WindowId:      workspaceEntry.WindowId,
+			WorkspaceData: workspaceData,
+		})
+	}
+	return rtn, nil
+}
+
+func (ws *WshServer) RecordTEventCommand(ctx context.Context, data telemetrydata.TEvent) error {
+	err := telemetry.RecordTEvent(ctx, &data)
+	if err != nil {
+		log.Printf("error recording telemetry event: %v", err)
+	}
+	return err
+}
+
+func (ws WshServer) SendTelemetryCommand(ctx context.Context) error {
+	client, err := wstore.DBGetSingleton[*waveobj.Client](ctx)
+	if err != nil {
+		return fmt.Errorf("getting client data for telemetry: %v", err)
+	}
+	return wcloud.SendAllTelemetry(ctx, client.OID)
+}
+
+var wshActivityRe = regexp.MustCompile(`^[a-z:#]+$`)
+
+func (ws *WshServer) WshActivityCommand(ctx context.Context, data map[string]int) error {
+	if len(data) == 0 {
+		return nil
+	}
+	props := telemetrydata.TEventProps{}
+	for key, value := range data {
+		if len(key) > 20 {
+			delete(data, key)
+		}
+		if !wshActivityRe.MatchString(key) {
+			delete(data, key)
+		}
+		if value != 1 {
+			delete(data, key)
+		}
+		if strings.HasSuffix(key, "#error") {
+			props.WshHadError = true
+		} else {
+			props.WshCmd = key
+		}
+	}
+	activityUpdate := wshrpc.ActivityUpdate{
+		WshCmds: data,
+	}
+	telemetry.GoUpdateActivityWrap(activityUpdate, "wsh-activity")
+	telemetry.GoRecordTEventWrap(&telemetrydata.TEvent{
+		Event: "wsh:run",
+		Props: props,
+	})
+	return nil
+}
+
+func (ws *WshServer) ActivityCommand(ctx context.Context, activity wshrpc.ActivityUpdate) error {
+	telemetry.GoUpdateActivityWrap(activity, "wshrpc-activity")
+	return nil
+}
+
+func (ws *WshServer) GetVarCommand(ctx context.Context, data wshrpc.CommandVarData) (*wshrpc.CommandVarResponseData, error) {
+	_, fileData, err := filestore.WFS.ReadFile(ctx, data.ZoneId, data.FileName)
+	if err == fs.ErrNotExist {
+		return &wshrpc.CommandVarResponseData{Key: data.Key, Exists: false}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error reading blockfile: %w", err)
+	}
+	envMap := envutil.EnvToMap(string(fileData))
+	value, ok := envMap[data.Key]
+	return &wshrpc.CommandVarResponseData{Key: data.Key, Exists: ok, Val: value}, nil
+}
+
+func (ws *WshServer) SetVarCommand(ctx context.Context, data wshrpc.CommandVarData) error {
+	_, fileData, err := filestore.WFS.ReadFile(ctx, data.ZoneId, data.FileName)
+	if err == fs.ErrNotExist {
+		fileData = []byte{}
+		err = filestore.WFS.MakeFile(ctx, data.ZoneId, data.FileName, nil, wshrpc.FileOpts{})
+		if err != nil {
+			return fmt.Errorf("error creating blockfile: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("error reading blockfile: %w", err)
+	}
+	envMap := envutil.EnvToMap(string(fileData))
+	if data.Remove {
+		delete(envMap, data.Key)
+	} else {
+		envMap[data.Key] = data.Val
+	}
+	envStr := envutil.MapToEnv(envMap)
+	return filestore.WFS.WriteFile(ctx, data.ZoneId, data.FileName, []byte(envStr))
+}
+
+func (ws *WshServer) PathCommand(ctx context.Context, data wshrpc.PathCommandData) (string, error) {
+	pathType := data.PathType
+	openInternal := data.Open
+	openExternal := data.OpenExternal
+	var path string
+	switch pathType {
+	case "config":
+		path = wavebase.GetWaveConfigDir()
+	case "data":
+		path = wavebase.GetWaveDataDir()
+	case "log":
+		path = filepath.Join(wavebase.GetWaveDataDir(), "waveapp.log")
+	}
+
+	if openInternal && openExternal {
+		return "", fmt.Errorf("open and openExternal cannot both be true")
+	}
+
+	if openInternal {
+		_, err := ws.CreateBlockCommand(ctx, wshrpc.CommandCreateBlockData{BlockDef: &waveobj.BlockDef{Meta: map[string]any{
+			waveobj.MetaKey_View: "preview",
+			waveobj.MetaKey_File: path,
+		}}, Ephemeral: true, TabId: data.TabId})
+
+		if err != nil {
+			return path, fmt.Errorf("error opening path: %w", err)
+		}
+	} else if openExternal {
+		err := open.Run(path)
+		if err != nil {
+			return path, fmt.Errorf("error opening path: %w", err)
+		}
+	}
+	return path, nil
+}
+
+func (ws *WshServer) FetchSuggestionsCommand(ctx context.Context, data wshrpc.FetchSuggestionsData) (*wshrpc.FetchSuggestionsResponse, error) {
+	return suggestion.FetchSuggestions(ctx, data)
+}
+
+func (ws *WshServer) DisposeSuggestionsCommand(ctx context.Context, widgetId string) error {
+	suggestion.DisposeSuggestions(ctx, widgetId)
+	return nil
+}
+
+func (ws *WshServer) GetTabCommand(ctx context.Context, tabId string) (*waveobj.Tab, error) {
+	tab, err := wstore.DBGet[*waveobj.Tab](ctx, tabId)
+	if err != nil {
+		return nil, fmt.Errorf("error getting tab: %w", err)
+	}
+	return tab, nil
 }

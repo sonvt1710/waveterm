@@ -3,13 +3,12 @@ import type { Preview } from "@storybook/react";
 import React from "react";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
-import "../frontend/app/theme.less";
-import "../frontend/app/app.less";
-import "../frontend/app/reset.less";
+import "../frontend/app/theme.scss";
+import "../frontend/app/app.scss";
+import "../frontend/app/reset.scss";
 import "./global.css";
 import { light, dark } from "./theme";
 import { DocsContainer } from "@storybook/addon-docs";
-
 import { addons } from "@storybook/preview-api";
 import { DARK_MODE_EVENT_NAME } from "storybook-dark-mode";
 

@@ -1,16 +1,17 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import { atoms, globalStore, recordTEvent, refocusNode } from "@/app/store/global";
+import { RpcApi } from "@/app/store/wshclientapi";
+import { TabRpcClient } from "@/app/store/wshrpcutil";
 import { Button } from "@/element/button";
 import { ContextMenuModel } from "@/store/contextmenu";
-import * as services from "@/store/services";
-import * as WOS from "@/store/wos";
+import { fireAndForget } from "@/util/util";
 import { clsx } from "clsx";
-import * as React from "react";
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-
-import { atoms, globalStore } from "@/app/store/global";
-import "./tab.less";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { ObjectService } from "../store/services";
+import { makeORef, useWaveObjectValue } from "../store/wos";
+import "./tab.scss";
 
 interface TabProps {
     id: string;
@@ -20,19 +21,21 @@ interface TabProps {
     isDragging: boolean;
     tabWidth: number;
     isNew: boolean;
+    isPinned: boolean;
     onSelect: () => void;
     onClose: (event: React.MouseEvent<HTMLButtonElement, MouseEvent> | null) => void;
     onDragStart: (event: React.MouseEvent<HTMLDivElement, MouseEvent>) => void;
     onLoaded: () => void;
+    onPinChange: () => void;
 }
 
-const Tab = React.memo(
+const Tab = memo(
     forwardRef<HTMLDivElement, TabProps>(
         (
             {
                 id,
                 active,
-                isFirst,
+                isPinned,
                 isBeforeActive,
                 isDragging,
                 tabWidth,
@@ -41,10 +44,11 @@ const Tab = React.memo(
                 onSelect,
                 onClose,
                 onDragStart,
+                onPinChange,
             },
             ref
         ) => {
-            const [tabData, tabLoading] = WOS.useWaveObjectValue<Tab>(WOS.makeORef("tab", id));
+            const [tabData, _] = useWaveObjectValue<Tab>(makeORef("tab", id));
             const [originalName, setOriginalName] = useState("");
             const [isEditable, setIsEditable] = useState(false);
 
@@ -69,14 +73,21 @@ const Tab = React.memo(
                 };
             }, []);
 
-            const handleDoubleClick = (event) => {
-                event.stopPropagation();
+            const selectEditableText = useCallback(() => {
+                if (editableRef.current) {
+                    const range = document.createRange();
+                    const selection = window.getSelection();
+                    range.selectNodeContents(editableRef.current);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+            }, []);
+
+            const handleRenameTab: React.MouseEventHandler<HTMLDivElement> = (event) => {
+                event?.stopPropagation();
                 setIsEditable(true);
                 editableTimeoutRef.current = setTimeout(() => {
-                    if (editableRef.current) {
-                        editableRef.current.focus();
-                        document.execCommand("selectAll", false);
-                    }
+                    selectEditableText();
                 }, 0);
             };
 
@@ -85,19 +96,14 @@ const Tab = React.memo(
                 newText = newText || originalName;
                 editableRef.current.innerText = newText;
                 setIsEditable(false);
-                services.ObjectService.UpdateTabName(id, newText);
+                fireAndForget(() => ObjectService.UpdateTabName(id, newText));
+                setTimeout(() => refocusNode(null), 10);
             };
 
-            const handleKeyDown = (event) => {
+            const handleKeyDown: React.KeyboardEventHandler<HTMLDivElement> = (event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === "a") {
                     event.preventDefault();
-                    if (editableRef.current) {
-                        const range = document.createRange();
-                        const selection = window.getSelection();
-                        range.selectNodeContents(editableRef.current);
-                        selection.removeAllRanges();
-                        selection.addRange(range);
-                    }
+                    selectEditableText();
                     return;
                 }
                 // this counts glyphs, not characters
@@ -114,7 +120,7 @@ const Tab = React.memo(
                     editableRef.current.blur();
                     event.preventDefault();
                     event.stopPropagation();
-                } else if (curLen >= 10 && !["Backspace", "Delete", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+                } else if (curLen >= 14 && !["Backspace", "Delete", "ArrowLeft", "ArrowRight"].includes(event.key)) {
                     event.preventDefault();
                     event.stopPropagation();
                 }
@@ -140,51 +146,62 @@ const Tab = React.memo(
                 event.stopPropagation();
             };
 
-            function handleContextMenu(e: React.MouseEvent<HTMLDivElement, MouseEvent>) {
-                e.preventDefault();
-                let menu: ContextMenuItem[] = [];
-                const fullConfig = globalStore.get(atoms.fullConfigAtom);
-                const bgPresets: string[] = [];
-                for (const key in fullConfig?.presets ?? {}) {
-                    if (key.startsWith("bg@")) {
-                        bgPresets.push(key);
-                    }
-                }
-                bgPresets.sort((a, b) => {
-                    const aOrder = fullConfig.presets[a]["display:order"] ?? 0;
-                    const bOrder = fullConfig.presets[b]["display:order"] ?? 0;
-                    return aOrder - bOrder;
-                });
-                menu.push({ label: "Copy TabId", click: () => navigator.clipboard.writeText(id) });
-                menu.push({ type: "separator" });
-                if (bgPresets.length > 0) {
-                    const submenu: ContextMenuItem[] = [];
-                    const oref = WOS.makeORef("tab", id);
-                    for (const presetName of bgPresets) {
-                        const preset = fullConfig.presets[presetName];
-                        if (preset == null) {
-                            continue;
+            const handleContextMenu = useCallback(
+                (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+                    e.preventDefault();
+                    let menu: ContextMenuItem[] = [
+                        { label: isPinned ? "Unpin Tab" : "Pin Tab", click: () => onPinChange() },
+                        { label: "Rename Tab", click: () => handleRenameTab(null) },
+                        {
+                            label: "Copy TabId",
+                            click: () => fireAndForget(() => navigator.clipboard.writeText(id)),
+                        },
+                        { type: "separator" },
+                    ];
+                    const fullConfig = globalStore.get(atoms.fullConfigAtom);
+                    const bgPresets: string[] = [];
+                    for (const key in fullConfig?.presets ?? {}) {
+                        if (key.startsWith("bg@")) {
+                            bgPresets.push(key);
                         }
-                        submenu.push({
-                            label: preset["display:name"] ?? presetName,
-                            click: () => {
-                                services.ObjectService.UpdateObjectMeta(oref, preset);
-                            },
-                        });
                     }
-                    menu.push({ label: "Backgrounds", type: "submenu", submenu });
-                    menu.push({ type: "separator" });
-                }
-                menu.push({ label: "Close Tab", click: () => onClose(null) });
-                ContextMenuModel.showContextMenu(menu, e);
-            }
+                    bgPresets.sort((a, b) => {
+                        const aOrder = fullConfig.presets[a]["display:order"] ?? 0;
+                        const bOrder = fullConfig.presets[b]["display:order"] ?? 0;
+                        return aOrder - bOrder;
+                    });
+                    if (bgPresets.length > 0) {
+                        const submenu: ContextMenuItem[] = [];
+                        const oref = makeORef("tab", id);
+                        for (const presetName of bgPresets) {
+                            const preset = fullConfig.presets[presetName];
+                            if (preset == null) {
+                                continue;
+                            }
+                            submenu.push({
+                                label: preset["display:name"] ?? presetName,
+                                click: () =>
+                                    fireAndForget(async () => {
+                                        await ObjectService.UpdateObjectMeta(oref, preset);
+                                        RpcApi.ActivityCommand(TabRpcClient, { settabtheme: 1 }, { noresponse: true });
+                                        recordTEvent("action:settabtheme");
+                                    }),
+                            });
+                        }
+                        menu.push({ label: "Backgrounds", type: "submenu", submenu }, { type: "separator" });
+                    }
+                    menu.push({ label: "Close Tab", click: () => onClose(null) });
+                    ContextMenuModel.showContextMenu(menu, e);
+                },
+                [onPinChange, handleRenameTab, id, onClose, isPinned]
+            );
 
             return (
                 <div
                     ref={tabRef}
                     className={clsx("tab", {
                         active,
-                        isDragging,
+                        dragging: isDragging,
                         "before-active": isBeforeActive,
                         "new-tab": isNew,
                     })}
@@ -198,16 +215,34 @@ const Tab = React.memo(
                             ref={editableRef}
                             className={clsx("name", { focused: isEditable })}
                             contentEditable={isEditable}
-                            onDoubleClick={handleDoubleClick}
+                            onDoubleClick={handleRenameTab}
                             onBlur={handleBlur}
                             onKeyDown={handleKeyDown}
                             suppressContentEditableWarning={true}
                         >
                             {tabData?.name}
                         </div>
-                        <Button className="ghost grey close" onClick={onClose} onMouseDown={handleMouseDownOnClose}>
-                            <i className="fa fa-solid fa-xmark" />
-                        </Button>
+                        {isPinned ? (
+                            <Button
+                                className="ghost grey pin"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onPinChange();
+                                }}
+                                title="Unpin Tab"
+                            >
+                                <i className="fa fa-solid fa-thumbtack" />
+                            </Button>
+                        ) : (
+                            <Button
+                                className="ghost grey close"
+                                onClick={onClose}
+                                onMouseDown={handleMouseDownOnClose}
+                                title="Close Tab"
+                            >
+                                <i className="fa fa-solid fa-xmark" />
+                            </Button>
+                        )}
                     </div>
                 </div>
             );

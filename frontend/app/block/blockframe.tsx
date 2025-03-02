@@ -1,44 +1,35 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-    blockViewToIcon,
-    blockViewToName,
-    computeConnColorNum,
-    ConnectionButton,
-    ControllerStatusIcon,
-    getBlockHeaderIcon,
-    Input,
-} from "@/app/block/blockutil";
+import { blockViewToIcon, blockViewToName, ConnectionButton, getBlockHeaderIcon, Input } from "@/app/block/blockutil";
 import { Button } from "@/app/element/button";
 import { useDimensionsWithCallbackRef } from "@/app/hook/useDimensions";
-import { TypeAheadModal } from "@/app/modals/typeaheadmodal";
+import { ChangeConnectionBlockModal } from "@/app/modals/conntypeahead";
 import { ContextMenuModel } from "@/app/store/contextmenu";
 import {
     atoms,
     getBlockComponentModel,
     getConnStatusAtom,
-    getHostName,
     getSettingsKeyAtom,
-    getUserName,
     globalStore,
-    refocusNode,
+    recordTEvent,
     useBlockAtom,
     WOS,
 } from "@/app/store/global";
-import * as services from "@/app/store/services";
 import { RpcApi } from "@/app/store/wshclientapi";
-import { WindowRpcClient } from "@/app/store/wshrpcutil";
+import { TabRpcClient } from "@/app/store/wshrpcutil";
 import { ErrorBoundary } from "@/element/errorboundary";
-import { IconButton } from "@/element/iconbutton";
+import { IconButton, ToggleIconButton } from "@/element/iconbutton";
 import { MagnifyIcon } from "@/element/magnify";
 import { MenuButton } from "@/element/menubutton";
 import { NodeModel } from "@/layout/index";
-import * as keyutil from "@/util/keyutil";
 import * as util from "@/util/util";
+import { computeBgStyleFromMeta } from "@/util/waveutil";
 import clsx from "clsx";
 import * as jotai from "jotai";
+import { OverlayScrollbarsComponent } from "overlayscrollbars-react";
 import * as React from "react";
+import { CopyButton } from "../element/copybutton";
 import { BlockFrameProps } from "./blocktypes";
 
 const NumActiveConnColors = 8;
@@ -60,17 +51,17 @@ function handleHeaderContextMenu(
                 onMagnifyToggle();
             },
         },
-        {
-            label: "Move to New Window",
-            click: () => {
-                const currentTabId = globalStore.get(atoms.activeTabId);
-                try {
-                    services.WindowService.MoveBlockToNewWindow(currentTabId, blockData.oid);
-                } catch (e) {
-                    console.error("error moving block to new window", e);
-                }
-            },
-        },
+        // {
+        //     label: "Move to New Window",
+        //     click: () => {
+        //         const currentTabId = globalStore.get(atoms.staticTabId);
+        //         try {
+        //             services.WindowService.MoveBlockToNewWindow(currentTabId, blockData.oid);
+        //         } catch (e) {
+        //             console.error("error moving block to new window", e);
+        //         }
+        //     },
+        // },
         { type: "separator" },
         {
             label: "Copy BlockId",
@@ -121,6 +112,7 @@ function computeEndIcons(
     const endIconsElem: JSX.Element[] = [];
     const endIconButtons = util.useAtomValueSafe(viewModel?.endIconButtons);
     const magnified = jotai.useAtomValue(nodeModel.isMagnified);
+    const ephemeral = jotai.useAtomValue(nodeModel.isEphemeral);
     const numLeafs = jotai.useAtomValue(nodeModel.numLeafs);
     const magnifyDisabled = numLeafs <= 1;
 
@@ -134,14 +126,27 @@ function computeEndIcons(
         click: onContextMenu,
     };
     endIconsElem.push(<IconButton key="settings" decl={settingsDecl} className="block-frame-settings" />);
-    endIconsElem.push(
-        <OptMagnifyButton
-            key="unmagnify"
-            magnified={magnified}
-            toggleMagnify={nodeModel.toggleMagnify}
-            disabled={magnifyDisabled}
-        />
-    );
+    if (ephemeral) {
+        const addToLayoutDecl: IconButtonDecl = {
+            elemtype: "iconbutton",
+            icon: "circle-plus",
+            title: "Add to Layout",
+            click: () => {
+                nodeModel.addEphemeralNodeToLayout();
+            },
+        };
+        endIconsElem.push(<IconButton key="add-to-layout" decl={addToLayoutDecl} />);
+    } else {
+        endIconsElem.push(
+            <OptMagnifyButton
+                key="unmagnify"
+                magnified={magnified}
+                toggleMagnify={nodeModel.toggleMagnify}
+                disabled={magnifyDisabled}
+            />
+        );
+    }
+
     const closeDecl: IconButtonDecl = {
         elemtype: "iconbutton",
         icon: "xmark-large",
@@ -167,8 +172,20 @@ const BlockFrame_Header = ({
     const preIconButton = util.useAtomValueSafe(viewModel?.preIconButton);
     let headerTextUnion = util.useAtomValueSafe(viewModel?.viewText);
     const magnified = jotai.useAtomValue(nodeModel.isMagnified);
+    const prevMagifiedState = React.useRef(magnified);
     const manageConnection = util.useAtomValueSafe(viewModel?.manageConnection);
     const dragHandleRef = preview ? null : nodeModel.dragHandleRef;
+    const connName = blockData?.meta?.connection;
+    const connStatus = util.useAtomValueSafe(getConnStatusAtom(connName));
+    const wshProblem = connName && !connStatus?.wshenabled && connStatus?.status == "connected";
+
+    React.useEffect(() => {
+        if (!magnified || preview || prevMagifiedState.current) {
+            return;
+        }
+        RpcApi.ActivityCommand(TabRpcClient, { nummagnify: 1 });
+        recordTEvent("action:magnify", { "block:view": viewName });
+    }, [magnified]);
 
     if (blockData?.meta?.["frame:title"]) {
         viewName = blockData.meta["frame:title"];
@@ -206,7 +223,6 @@ const BlockFrame_Header = ({
     } else if (Array.isArray(headerTextUnion)) {
         headerTextElems.push(...renderHeaderElements(headerTextUnion, preview));
     }
-    headerTextElems.unshift(<ControllerStatusIcon key="connstatus" blockId={nodeModel.blockId} />);
     if (error != null) {
         const copyHeaderErr = () => {
             navigator.clipboard.writeText(error.message + "\n" + error.stack);
@@ -220,9 +236,20 @@ const BlockFrame_Header = ({
             </div>
         );
     }
+    const wshInstallButton: IconButtonDecl = {
+        elemtype: "iconbutton",
+        icon: "link-slash",
+        title: "wsh is not installed for this connection",
+    };
+    const showNoWshButton = manageConnection && wshProblem && !util.isBlank(connName) && !connName.startsWith("aws:");
 
     return (
-        <div className="block-frame-default-header" ref={dragHandleRef} onContextMenu={onContextMenu}>
+        <div
+            className="block-frame-default-header"
+            data-role="block-header"
+            ref={dragHandleRef}
+            onContextMenu={onContextMenu}
+        >
             {preIconButtonElem}
             <div className="block-frame-default-header-iconview">
                 {viewIconElem}
@@ -237,6 +264,7 @@ const BlockFrame_Header = ({
                     changeConnModalAtom={changeConnModalAtom}
                 />
             )}
+            {showNoWshButton && <IconButton decl={wshInstallButton} className="block-frame-header-iconbutton" />}
             <div className="block-frame-textelems-wrapper">{headerTextElems}</div>
             <div className="block-frame-end-icons">{endIconsElem}</div>
         </div>
@@ -246,11 +274,13 @@ const BlockFrame_Header = ({
 const HeaderTextElem = React.memo(({ elem, preview }: { elem: HeaderElem; preview: boolean }) => {
     if (elem.elemtype == "iconbutton") {
         return <IconButton decl={elem} className={clsx("block-frame-header-iconbutton", elem.className)} />;
+    } else if (elem.elemtype == "toggleiconbutton") {
+        return <ToggleIconButton decl={elem} className={clsx("block-frame-header-iconbutton", elem.className)} />;
     } else if (elem.elemtype == "input") {
         return <Input decl={elem} className={clsx("block-frame-input", elem.className)} preview={preview} />;
     } else if (elem.elemtype == "text") {
         return (
-            <div className={clsx("block-frame-text", elem.className)}>
+            <div className={clsx("block-frame-text", elem.className, { "flex-nogrow": elem.noGrow })}>
                 <span ref={preview ? null : elem.ref} onClick={(e) => elem?.onClick(e)}>
                     &lrm;{elem.text}
                 </span>
@@ -258,7 +288,7 @@ const HeaderTextElem = React.memo(({ elem, preview }: { elem: HeaderElem; previe
         );
     } else if (elem.elemtype == "textbutton") {
         return (
-            <Button className={elem.className} onClick={(e) => elem.onClick(e)}>
+            <Button className={elem.className} onClick={(e) => elem.onClick(e)} title={elem.title}>
                 {elem.text}
             </Button>
         );
@@ -310,25 +340,58 @@ const ConnStatusOverlay = React.memo(
         const [overlayRefCallback, _, domRect] = useDimensionsWithCallbackRef(30);
         const width = domRect?.width;
         const [showError, setShowError] = React.useState(false);
-        const blockNum = jotai.useAtomValue(nodeModel.blockNum);
+        const fullConfig = jotai.useAtomValue(atoms.fullConfigAtom);
+        const [showWshError, setShowWshError] = React.useState(false);
 
         React.useEffect(() => {
             if (width) {
                 const hasError = !util.isBlank(connStatus.error);
-                const showError = hasError && width >= 250 && connStatus.status != "connecting";
+                const showError = hasError && width >= 250 && connStatus.status == "error";
                 setShowError(showError);
             }
         }, [width, connStatus, setShowError]);
 
         const handleTryReconnect = React.useCallback(() => {
-            const prtn = RpcApi.ConnConnectCommand(WindowRpcClient, connName, { timeout: 60000 });
+            const prtn = RpcApi.ConnConnectCommand(
+                TabRpcClient,
+                { host: connName, logblockid: nodeModel.blockId },
+                { timeout: 60000 }
+            );
             prtn.catch((e) => console.log("error reconnecting", connName, e));
+        }, [connName]);
+
+        const handleDisableWsh = React.useCallback(async () => {
+            // using unknown is a hack. we need proper types for the
+            // connection config on the frontend
+            const metamaptype: unknown = {
+                "conn:wshenabled": false,
+            };
+            const data: ConnConfigRequest = {
+                host: connName,
+                metamaptype: metamaptype,
+            };
+            try {
+                await RpcApi.SetConnectionsConfigCommand(TabRpcClient, data);
+            } catch (e) {
+                console.log("problem setting connection config: ", e);
+            }
+        }, [connName]);
+
+        const handleRemoveWshError = React.useCallback(async () => {
+            try {
+                await RpcApi.DismissWshFailCommand(TabRpcClient, connName);
+            } catch (e) {
+                console.log("unable to dismiss wsh error: ", e);
+            }
         }, [connName]);
 
         let statusText = `Disconnected from "${connName}"`;
         let showReconnect = true;
         if (connStatus.status == "connecting") {
             statusText = `Connecting to "${connName}"...`;
+            showReconnect = false;
+        }
+        if (connStatus.status == "connected") {
             showReconnect = false;
         }
         let reconDisplay = null;
@@ -342,18 +405,58 @@ const ConnStatusOverlay = React.memo(
         }
         const showIcon = connStatus.status != "connecting";
 
-        if (isLayoutMode || connStatus.status == "connected" || connModalOpen) {
+        const wshConfigEnabled = fullConfig?.connections?.[connName]?.["conn:wshenabled"] ?? true;
+        React.useEffect(() => {
+            const showWshErrorTemp =
+                connStatus.status == "connected" &&
+                connStatus.wsherror &&
+                connStatus.wsherror != "" &&
+                wshConfigEnabled;
+
+            setShowWshError(showWshErrorTemp);
+        }, [connStatus, wshConfigEnabled]);
+
+        const handleCopy = React.useCallback(
+            async (e: React.MouseEvent) => {
+                const errTexts = [];
+                if (showError) {
+                    errTexts.push(`error: ${connStatus.error}`);
+                }
+                if (showWshError) {
+                    errTexts.push(`unable to use wsh: ${connStatus.wsherror}`);
+                }
+                const textToCopy = errTexts.join("\n");
+                await navigator.clipboard.writeText(textToCopy);
+            },
+            [showError, showWshError, connStatus.error, connStatus.wsherror]
+        );
+
+        if (!showWshError && (isLayoutMode || connStatus.status == "connected" || connModalOpen)) {
             return null;
         }
 
         return (
             <div className="connstatus-overlay" ref={overlayRefCallback}>
                 <div className="connstatus-content">
-                    <div className={clsx("connstatus-status-icon-wrapper", { "has-error": showError })}>
+                    <div className={clsx("connstatus-status-icon-wrapper", { "has-error": showError || showWshError })}>
                         {showIcon && <i className="fa-solid fa-triangle-exclamation"></i>}
                         <div className="connstatus-status">
                             <div className="connstatus-status-text">{statusText}</div>
-                            {showError ? <div className="connstatus-error">error: {connStatus.error}</div> : null}
+                            {(showError || showWshError) && (
+                                <OverlayScrollbarsComponent
+                                    className="connstatus-error"
+                                    options={{ scrollbars: { autoHide: "leave" } }}
+                                >
+                                    <CopyButton className="copy-button" onClick={handleCopy} title="Copy" />
+                                    {showError ? <div>error: {connStatus.error}</div> : null}
+                                    {showWshError ? <div>unable to use wsh: {connStatus.wsherror}</div> : null}
+                                </OverlayScrollbarsComponent>
+                            )}
+                            {showWshError && (
+                                <Button className={reconClassName} onClick={handleDisableWsh}>
+                                    always disable wsh
+                                </Button>
+                            )}
                         </div>
                     </div>
                     {showReconnect ? (
@@ -361,6 +464,11 @@ const ConnStatusOverlay = React.memo(
                             <Button className={reconClassName} onClick={handleTryReconnect}>
                                 {reconDisplay}
                             </Button>
+                        </div>
+                    ) : null}
+                    {showWshError ? (
+                        <div className="connstatus-actions">
+                            <Button className={`fa-xmark fa-solid ${reconClassName}`} onClick={handleRemoveWshError} />
                         </div>
                     ) : null}
                 </div>
@@ -376,12 +484,24 @@ const BlockMask = React.memo(({ nodeModel }: { nodeModel: NodeModel }) => {
     const [blockData] = WOS.useWaveObjectValue<Block>(WOS.makeORef("block", nodeModel.blockId));
     const style: React.CSSProperties = {};
     let showBlockMask = false;
-
-    if (!isFocused && blockData?.meta?.["frame:bordercolor"]) {
-        style.borderColor = blockData.meta["frame:bordercolor"];
-    }
-    if (isFocused && blockData?.meta?.["frame:bordercolor:focused"]) {
-        style.borderColor = blockData.meta["frame:bordercolor:focused"];
+    if (isFocused) {
+        const tabData = jotai.useAtomValue(atoms.tabAtom);
+        const tabActiveBorderColor = tabData?.meta?.["bg:activebordercolor"];
+        if (tabActiveBorderColor) {
+            style.borderColor = tabActiveBorderColor;
+        }
+        if (blockData?.meta?.["frame:activebordercolor"]) {
+            style.borderColor = blockData.meta["frame:activebordercolor"];
+        }
+    } else {
+        const tabData = jotai.useAtomValue(atoms.tabAtom);
+        const tabBorderColor = tabData?.meta?.["bg:bordercolor"];
+        if (tabBorderColor) {
+            style.borderColor = tabBorderColor;
+        }
+        if (blockData?.meta?.["frame:bordercolor"]) {
+            style.borderColor = blockData.meta["frame:bordercolor"];
+        }
     }
     let innerElem = null;
     if (isLayoutMode) {
@@ -410,8 +530,15 @@ const BlockFrame_Default_Component = (props: BlockFrameProps) => {
         return jotai.atom(false);
     }) as jotai.PrimitiveAtom<boolean>;
     const connModalOpen = jotai.useAtomValue(changeConnModalAtom);
-
+    const isMagnified = jotai.useAtomValue(nodeModel.isMagnified);
+    const isEphemeral = jotai.useAtomValue(nodeModel.isEphemeral);
+    const [magnifiedBlockBlurAtom] = React.useState(() => getSettingsKeyAtom("window:magnifiedblockblurprimarypx"));
+    const magnifiedBlockBlur = jotai.useAtomValue(magnifiedBlockBlurAtom);
+    const [magnifiedBlockOpacityAtom] = React.useState(() => getSettingsKeyAtom("window:magnifiedblockopacity"));
+    const magnifiedBlockOpacity = jotai.useAtomValue(magnifiedBlockOpacityAtom);
     const connBtnRef = React.useRef<HTMLDivElement>();
+    const noHeader = util.useAtomValueSafe(viewModel?.noHeader);
+
     React.useEffect(() => {
         if (!manageConnection) {
             return;
@@ -437,22 +564,20 @@ const BlockFrame_Default_Component = (props: BlockFrameProps) => {
         const connName = blockData?.meta?.connection;
         if (!util.isBlank(connName)) {
             console.log("ensure conn", nodeModel.blockId, connName);
-            RpcApi.ConnEnsureCommand(WindowRpcClient, connName, { timeout: 60000 }).catch((e) => {
+            RpcApi.ConnEnsureCommand(
+                TabRpcClient,
+                { connname: connName, logblockid: nodeModel.blockId },
+                { timeout: 60000 }
+            ).catch((e) => {
                 console.log("error ensuring connection", nodeModel.blockId, connName, e);
             });
         }
     }, [manageConnection, blockData]);
 
     const viewIconElem = getViewIconElem(viewIconUnion, blockData);
-    const innerStyle: React.CSSProperties = {};
-    if (!preview && customBg?.bg != null) {
-        innerStyle.background = customBg.bg;
-        if (customBg["bg:opacity"] != null) {
-            innerStyle.opacity = customBg["bg:opacity"];
-        }
-        if (customBg["bg:blendmode"] != null) {
-            innerStyle.backgroundBlendMode = customBg["bg:blendmode"];
-        }
+    let innerStyle: React.CSSProperties = {};
+    if (!preview) {
+        innerStyle = computeBgStyleFromMeta(customBg);
     }
     const previewElem = <div className="block-frame-preview">{viewIconElem}</div>;
     const headerElem = (
@@ -465,11 +590,21 @@ const BlockFrame_Default_Component = (props: BlockFrameProps) => {
                 "block-focused": isFocused || preview,
                 "block-preview": preview,
                 "block-no-highlight": numBlocksInTab === 1,
+                ephemeral: isEphemeral,
+                magnified: isMagnified,
             })}
             data-blockid={nodeModel.blockId}
             onClick={blockModel?.onClick}
             onFocusCapture={blockModel?.onFocusCapture}
             ref={blockModel?.blockRef}
+            style={
+                {
+                    "--magnified-block-opacity": magnifiedBlockOpacity,
+                    "--magnified-block-blur": `${magnifiedBlockBlur}px`,
+                } as React.CSSProperties
+            }
+            // @ts-ignore: inert does exist in the DOM, just not in react
+            inert={preview ? "1" : undefined} //
         >
             <BlockMask nodeModel={nodeModel} />
             {preview || viewModel == null ? null : (
@@ -480,7 +615,7 @@ const BlockFrame_Default_Component = (props: BlockFrameProps) => {
                 />
             )}
             <div className="block-frame-default-inner" style={innerStyle}>
-                <ErrorBoundary fallback={headerElemNoView}>{headerElem}</ErrorBoundary>
+                {noHeader || <ErrorBoundary fallback={headerElemNoView}>{headerElem}</ErrorBoundary>}
                 {preview ? previewElem : children}
             </div>
             {preview || viewModel == null || !connModalOpen ? null : (
@@ -497,260 +632,17 @@ const BlockFrame_Default_Component = (props: BlockFrameProps) => {
     );
 };
 
-const ChangeConnectionBlockModal = React.memo(
-    ({
-        blockId,
-        viewModel,
-        blockRef,
-        connBtnRef,
-        changeConnModalAtom,
-        nodeModel,
-    }: {
-        blockId: string;
-        viewModel: ViewModel;
-        blockRef: React.RefObject<HTMLDivElement>;
-        connBtnRef: React.RefObject<HTMLDivElement>;
-        changeConnModalAtom: jotai.PrimitiveAtom<boolean>;
-        nodeModel: NodeModel;
-    }) => {
-        const [connSelected, setConnSelected] = React.useState("");
-        const changeConnModalOpen = jotai.useAtomValue(changeConnModalAtom);
-        const [blockData] = WOS.useWaveObjectValue<Block>(WOS.makeORef("block", blockId));
-        const isNodeFocused = jotai.useAtomValue(nodeModel.isFocused);
-        const connection = blockData?.meta?.connection;
-        const connStatusAtom = getConnStatusAtom(connection);
-        const connStatus = jotai.useAtomValue(connStatusAtom);
-        const [connList, setConnList] = React.useState<Array<string>>([]);
-        const allConnStatus = jotai.useAtomValue(atoms.allConnStatus);
-        const [rowIndex, setRowIndex] = React.useState(0);
-        const connStatusMap = new Map<string, ConnStatus>();
-        let maxActiveConnNum = 1;
-        for (const conn of allConnStatus) {
-            if (conn.activeconnnum > maxActiveConnNum) {
-                maxActiveConnNum = conn.activeconnnum;
-            }
-            connStatusMap.set(conn.connection, conn);
-        }
-        React.useEffect(() => {
-            if (!changeConnModalOpen) {
-                setConnList([]);
-                return;
-            }
-            const prtn = RpcApi.ConnListCommand(WindowRpcClient, { timeout: 2000 });
-            prtn.then((newConnList) => {
-                setConnList(newConnList ?? []);
-            }).catch((e) => console.log("unable to load conn list from backend. using blank list: ", e));
-        }, [changeConnModalOpen, setConnList]);
-
-        const changeConnection = React.useCallback(
-            async (connName: string) => {
-                if (connName == "") {
-                    connName = null;
-                }
-                if (connName == blockData?.meta?.connection) {
-                    return;
-                }
-                const oldCwd = blockData?.meta?.file ?? "";
-                let newCwd: string;
-                if (oldCwd == "") {
-                    newCwd = "";
-                } else {
-                    newCwd = "~";
-                }
-                await RpcApi.SetMetaCommand(WindowRpcClient, {
-                    oref: WOS.makeORef("block", blockId),
-                    meta: { connection: connName, file: newCwd },
-                });
-                try {
-                    await RpcApi.ConnEnsureCommand(WindowRpcClient, connName, { timeout: 60000 });
-                } catch (e) {
-                    console.log("error connecting", blockId, connName, e);
-                }
-            },
-            [blockId, blockData]
-        );
-
-        let createNew: boolean = true;
-        let showLocal: boolean = true;
-        let showReconnect: boolean = true;
-        if (connSelected == "") {
-            createNew = false;
-        } else {
-            showLocal = false;
-            showReconnect = false;
-        }
-        const filteredList: Array<string> = [];
-        for (const conn of connList) {
-            if (conn === connSelected) {
-                createNew = false;
-            }
-            if (conn.includes(connSelected)) {
-                filteredList.push(conn);
-            }
-        }
-        // priority handles special suggestions when necessary
-        // for instance, when reconnecting
-        const newConnectionSuggestion: SuggestionConnectionItem = {
-            status: "connected",
-            icon: "plus",
-            iconColor: "var(--conn-icon-color)",
-            label: `${connSelected} (New Connection)`,
-            value: "",
-            onSelect: (_: string) => {
-                changeConnection(connSelected);
-                globalStore.set(changeConnModalAtom, false);
-            },
-        };
-        const reconnectSuggestion: SuggestionConnectionItem = {
-            status: "connected",
-            icon: "arrow-right-arrow-left",
-            iconColor: "var(--grey-text-color)",
-            label: `Reconnect to ${connStatus.connection}`,
-            value: "",
-            onSelect: async (_: string) => {
-                const prtn = RpcApi.ConnConnectCommand(WindowRpcClient, connStatus.connection, { timeout: 60000 });
-                prtn.catch((e) => console.log("error reconnecting", connStatus.connection, e));
-            },
-        };
-        const priorityItems: Array<SuggestionConnectionItem> = [];
-        if (createNew) {
-            priorityItems.push(newConnectionSuggestion);
-        }
-        if (showReconnect && (connStatus.status == "disconnected" || connStatus.status == "error")) {
-            priorityItems.push(reconnectSuggestion);
-        }
-        const prioritySuggestions: SuggestionConnectionScope = {
-            headerText: "",
-            items: priorityItems,
-        };
-        const localName = getUserName() + "@" + getHostName();
-        const localSuggestion: SuggestionConnectionScope = {
-            headerText: "Local",
-            items: [],
-        };
-        if (showLocal) {
-            localSuggestion.items.push({
-                status: "connected",
-                icon: "laptop",
-                iconColor: "var(--grey-text-color)",
-                value: "",
-                label: localName,
-            });
-        }
-        const remoteItems = filteredList.map((connName) => {
-            const connStatus = connStatusMap.get(connName);
-            const connColorNum = computeConnColorNum(connStatus);
-            const item: SuggestionConnectionItem = {
-                status: "connected",
-                icon: "arrow-right-arrow-left",
-                iconColor:
-                    connStatus?.status == "connected"
-                        ? `var(--conn-icon-color-${connColorNum})`
-                        : "var(--grey-text-color)",
-                value: connName,
-                label: connName,
-            };
-            return item;
-        });
-        const remoteSuggestions: SuggestionConnectionScope = {
-            headerText: "Remote",
-            items: remoteItems,
-        };
-
-        let suggestions: Array<SuggestionsType> = [];
-        if (prioritySuggestions.items.length > 0) {
-            suggestions.push(prioritySuggestions);
-        }
-        if (localSuggestion.items.length > 0) {
-            suggestions.push(localSuggestion);
-        }
-        if (remoteSuggestions.items.length > 0) {
-            suggestions.push(remoteSuggestions);
-        }
-
-        let selectionList: Array<SuggestionConnectionItem> = [
-            ...prioritySuggestions.items,
-            ...localSuggestion.items,
-            ...remoteSuggestions.items,
-        ];
-
-        // quick way to change icon color when highlighted
-        selectionList = selectionList.map((item, index) => {
-            if (index == rowIndex && item.iconColor == "var(--grey-text-color)") {
-                item.iconColor = "var(--main-text-color)";
-            }
-            return item;
-        });
-
-        const handleTypeAheadKeyDown = React.useCallback(
-            (waveEvent: WaveKeyboardEvent): boolean => {
-                if (keyutil.checkKeyPressed(waveEvent, "Enter")) {
-                    const rowItem = selectionList[rowIndex];
-                    if ("onSelect" in rowItem && rowItem.onSelect) {
-                        rowItem.onSelect(rowItem.value);
-                    } else {
-                        changeConnection(rowItem.value);
-                        globalStore.set(changeConnModalAtom, false);
-                    }
-                }
-                if (keyutil.checkKeyPressed(waveEvent, "Escape")) {
-                    globalStore.set(changeConnModalAtom, false);
-                    setConnSelected("");
-                    refocusNode(blockId);
-                    return true;
-                }
-                if (keyutil.checkKeyPressed(waveEvent, "ArrowUp")) {
-                    setRowIndex((idx) => Math.max(idx - 1, 0));
-                    return true;
-                }
-                if (keyutil.checkKeyPressed(waveEvent, "ArrowDown")) {
-                    setRowIndex((idx) => Math.min(idx + 1, filteredList.length));
-                    return true;
-                }
-            },
-            [changeConnModalAtom, viewModel, blockId, connSelected, selectionList]
-        );
-        React.useEffect(() => {
-            setRowIndex((idx) => Math.min(idx, filteredList.length));
-        }, [selectionList, setRowIndex]);
-        // this check was also moved to BlockFrame to prevent all the above code from running unnecessarily
-        if (!changeConnModalOpen) {
-            return null;
-        }
-        return (
-            <TypeAheadModal
-                blockRef={blockRef}
-                anchorRef={connBtnRef}
-                suggestions={suggestions}
-                onSelect={(selected: string) => {
-                    changeConnection(selected);
-                    globalStore.set(changeConnModalAtom, false);
-                }}
-                selectIndex={rowIndex}
-                autoFocus={isNodeFocused}
-                onKeyDown={(e) => keyutil.keydownWrapper(handleTypeAheadKeyDown)(e)}
-                onChange={(current: string) => setConnSelected(current)}
-                value={connSelected}
-                label="Connect to (username@host)..."
-                onClickBackdrop={() => globalStore.set(changeConnModalAtom, false)}
-            />
-        );
-    }
-);
-
 const BlockFrame_Default = React.memo(BlockFrame_Default_Component) as typeof BlockFrame_Default_Component;
 
 const BlockFrame = React.memo((props: BlockFrameProps) => {
     const blockId = props.nodeModel.blockId;
     const [blockData] = WOS.useWaveObjectValue<Block>(WOS.makeORef("block", blockId));
     const tabData = jotai.useAtomValue(atoms.tabAtom);
-
     if (!blockId || !blockData) {
         return null;
     }
-    const FrameElem = BlockFrame_Default;
     const numBlocks = tabData?.blockids?.length ?? 0;
-    return <FrameElem {...props} numBlocksInTab={numBlocks} />;
+    return <BlockFrame_Default {...props} numBlocksInTab={numBlocks} />;
 });
 
 export { BlockFrame, NumActiveConnColors };

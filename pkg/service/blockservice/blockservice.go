@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package blockservice
@@ -38,7 +38,14 @@ func (bs *BlockService) GetControllerStatus(ctx context.Context, blockId string)
 	return bc.GetRuntimeStatus(), nil
 }
 
-func (bs *BlockService) SaveTerminalState(ctx context.Context, blockId string, state string, stateType string, ptyOffset int64) error {
+func (*BlockService) SaveTerminalState_Meta() tsgenmeta.MethodMeta {
+	return tsgenmeta.MethodMeta{
+		Desc:     "save the terminal state to a blockfile",
+		ArgNames: []string{"ctx", "blockId", "state", "stateType", "ptyOffset", "termSize"},
+	}
+}
+
+func (bs *BlockService) SaveTerminalState(ctx context.Context, blockId string, state string, stateType string, ptyOffset int64, termSize waveobj.TermSize) error {
 	_, err := wstore.DBMustGet[*waveobj.Block](ctx, blockId)
 	if err != nil {
 		return err
@@ -47,19 +54,23 @@ func (bs *BlockService) SaveTerminalState(ctx context.Context, blockId string, s
 		return fmt.Errorf("invalid state type: %q", stateType)
 	}
 	// ignore MakeFile error (already exists is ok)
-	filestore.WFS.MakeFile(ctx, blockId, "cache:term:"+stateType, nil, filestore.FileOptsType{})
+	filestore.WFS.MakeFile(ctx, blockId, "cache:term:"+stateType, nil, wshrpc.FileOpts{})
 	err = filestore.WFS.WriteFile(ctx, blockId, "cache:term:"+stateType, []byte(state))
 	if err != nil {
 		return fmt.Errorf("cannot save terminal state: %w", err)
 	}
-	err = filestore.WFS.WriteMeta(ctx, blockId, "cache:term:"+stateType, filestore.FileMeta{"ptyoffset": ptyOffset}, true)
+	fileMeta := wshrpc.FileMeta{
+		"ptyoffset": ptyOffset,
+		"termsize":  termSize,
+	}
+	err = filestore.WFS.WriteMeta(ctx, blockId, "cache:term:"+stateType, fileMeta, true)
 	if err != nil {
 		return fmt.Errorf("cannot save terminal state meta: %w", err)
 	}
 	return nil
 }
 
-func (bs *BlockService) SaveWaveAiData(ctx context.Context, blockId string, history []wshrpc.OpenAIPromptMessageType) error {
+func (bs *BlockService) SaveWaveAiData(ctx context.Context, blockId string, history []wshrpc.WaveAIPromptMessageType) error {
 	block, err := wstore.DBMustGet[*waveobj.Block](ctx, blockId)
 	if err != nil {
 		return err
@@ -73,7 +84,7 @@ func (bs *BlockService) SaveWaveAiData(ctx context.Context, blockId string, hist
 		return fmt.Errorf("unable to serialize ai history: %v", err)
 	}
 	// ignore MakeFile error (already exists is ok)
-	filestore.WFS.MakeFile(ctx, blockId, "aidata", nil, filestore.FileOptsType{})
+	filestore.WFS.MakeFile(ctx, blockId, "aidata", nil, wshrpc.FileOpts{})
 	err = filestore.WFS.WriteFile(ctx, blockId, "aidata", historyBytes)
 	if err != nil {
 		return fmt.Errorf("cannot save terminal state: %w", err)

@@ -35,13 +35,25 @@ Arch:
 sudo pacman -S zip zig
 ```
 
+##### For packaging
+
+For packaging, the following additional packages are required:
+
+- `fpm` &mdash; If you're on x64 you can skip this. If you're on ARM64, install fpm via [Gem](https://rubygems.org/gems/fpm)
+- `rpm` &mdash; If you're not on Fedora, install RPM via your package manager.
+- `snapd` &mdash; If your distro doesn't already include it, [install `snapd`](https://snapcraft.io/docs/installing-snapd)
+- `lxd` &mdash; [Installation instructions](https://canonical.com/lxd/install)
+- `snapcraft` &mdash; Run `sudo snap install snapcraft --classic`
+- `libarchive-tools` &mdash; Install via your package manager
+- `binutils` &mdash; Install via your package manager
+- `libopenjp2-tools` &mdash; Install via your package manager
+- `squashfs-tools` &mdash; Install via your package manager
+
 #### Windows
 
-You will need the GNU build toolchain installed in order for Go to work on Windows. In most cases, this requires installing MinGW-w64.
+You will need the [Zig](https://ziglang.org/) compiler for statically linking CGO.
 
-The easiest way to install this is using MSYS2: https://www.msys2.org/
-
-If you prefer an alternative method, you can find other methods here: https://www.mingw-w64.org/downloads/
+You can find installation instructions for Zig on Windows [here](https://ziglang.org/learn/getting-started/#managers).
 
 ### Task
 
@@ -55,7 +67,7 @@ Download and install Go via your package manager or directly from the website: h
 
 ### NodeJS
 
-Make sure you have a recent version of NodeJS installed (>= 20).
+Make sure you have a NodeJS 22 LTS installed.
 
 See NodeJS's website for platform-specific instructions: https://nodejs.org/en/download
 
@@ -90,6 +102,14 @@ or
 git clone https://github.com/wavetermdev/waveterm.git
 ```
 
+## Install code dependencies
+
+The first time you clone the repo, you'll need to run the following to load the dependencies. If you ever have issues building the app, try running this again:
+
+```sh
+task init
+```
+
 ## Build and Run
 
 All the methods below will install Node and Go dependencies when they run the first time. All these should be run from within the Git repository.
@@ -99,7 +119,7 @@ All the methods below will install Node and Go dependencies when they run the fi
 Run the following command to build the app and run it via Vite's development server (this enables Hot Module Reloading):
 
 ```sh
-task electron:dev
+task dev
 ```
 
 ### Standalone
@@ -107,7 +127,7 @@ task electron:dev
 Run the following command to build the app and run it standalone, without the development server. This will not reload on change:
 
 ```sh
-task electron:start
+task start
 ```
 
 ### Packaged
@@ -116,6 +136,12 @@ Run the following command to generate a production build and package it. This le
 
 ```sh
 task package
+```
+
+If you're on Linux ARM64, run the following:
+
+```sh
+USE_SYSTEM_FPM=1 task package
 ```
 
 ## Debugging

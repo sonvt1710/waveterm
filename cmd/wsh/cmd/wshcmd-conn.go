@@ -1,10 +1,11 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/wavetermdev/waveterm/pkg/remote"
@@ -13,69 +14,130 @@ import (
 )
 
 var connCmd = &cobra.Command{
-	Use:     "conn [status|reinstall|disconnect|connect|ensure] [connection-name]",
-	Short:   "implements connection commands",
-	Args:    cobra.RangeArgs(1, 2),
-	RunE:    connRun,
+	Use:   "conn",
+	Short: "manage Wave Terminal connections",
+	Long:  "Commands to manage Wave Terminal SSH and WSL connections",
+}
+
+var connStatusCmd = &cobra.Command{
+	Use:     "status",
+	Short:   "show status of all connections",
+	Args:    cobra.NoArgs,
+	RunE:    connStatusRun,
+	PreRunE: preRunSetupRpcClient,
+}
+
+var connReinstallCmd = &cobra.Command{
+	Use:     "reinstall CONNECTION",
+	Short:   "reinstall wsh on a connection",
+	RunE:    connReinstallRun,
+	PreRunE: preRunSetupRpcClient,
+}
+
+var connDisconnectCmd = &cobra.Command{
+	Use:     "disconnect CONNECTION",
+	Short:   "disconnect a connection",
+	Args:    cobra.ExactArgs(1),
+	RunE:    connDisconnectRun,
+	PreRunE: preRunSetupRpcClient,
+}
+
+var connDisconnectAllCmd = &cobra.Command{
+	Use:     "disconnectall",
+	Short:   "disconnect all connections",
+	Args:    cobra.NoArgs,
+	RunE:    connDisconnectAllRun,
+	PreRunE: preRunSetupRpcClient,
+}
+
+var connConnectCmd = &cobra.Command{
+	Use:     "connect CONNECTION",
+	Short:   "connect to a connection",
+	Args:    cobra.ExactArgs(1),
+	RunE:    connConnectRun,
+	PreRunE: preRunSetupRpcClient,
+}
+
+var connEnsureCmd = &cobra.Command{
+	Use:     "ensure CONNECTION",
+	Short:   "ensure wsh is installed on a connection",
+	Args:    cobra.ExactArgs(1),
+	RunE:    connEnsureRun,
 	PreRunE: preRunSetupRpcClient,
 }
 
 func init() {
 	rootCmd.AddCommand(connCmd)
+	connCmd.AddCommand(connStatusCmd)
+	connCmd.AddCommand(connReinstallCmd)
+	connCmd.AddCommand(connDisconnectCmd)
+	connCmd.AddCommand(connDisconnectAllCmd)
+	connCmd.AddCommand(connConnectCmd)
+	connCmd.AddCommand(connEnsureCmd)
 }
 
-func connStatus() error {
-	resp, err := wshclient.ConnStatusCommand(RpcClient, nil)
-	if err != nil {
-		return fmt.Errorf("getting connection status: %w", err)
+func validateConnectionName(name string) error {
+	if !strings.HasPrefix(name, "wsl://") {
+		_, err := remote.ParseOpts(name)
+		if err != nil {
+			return fmt.Errorf("cannot parse connection name: %w", err)
+		}
 	}
-	if len(resp) == 0 {
+	return nil
+}
+
+func getAllConnStatus() ([]wshrpc.ConnStatus, error) {
+	var allResp []wshrpc.ConnStatus
+	sshResp, err := wshclient.ConnStatusCommand(RpcClient, nil)
+	if err != nil {
+		return nil, fmt.Errorf("getting ssh connection status: %w", err)
+	}
+	allResp = append(allResp, sshResp...)
+	wslResp, err := wshclient.WslStatusCommand(RpcClient, nil)
+	if err != nil {
+		return nil, fmt.Errorf("getting wsl connection status: %w", err)
+	}
+	allResp = append(allResp, wslResp...)
+	return allResp, nil
+}
+
+func connStatusRun(cmd *cobra.Command, args []string) error {
+	allResp, err := getAllConnStatus()
+	if err != nil {
+		return err
+	}
+	if len(allResp) == 0 {
 		WriteStdout("no connections\n")
 		return nil
 	}
 	WriteStdout("%-30s %-12s\n", "connection", "status")
 	WriteStdout("----------------------------------------------\n")
-	for _, conn := range resp {
+	for _, conn := range allResp {
 		str := fmt.Sprintf("%-30s %-12s", conn.Connection, conn.Status)
 		if conn.Error != "" {
 			str += fmt.Sprintf(" (%s)", conn.Error)
 		}
-		str += "\n"
 		WriteStdout("%s\n", str)
 	}
 	return nil
 }
 
-func connDisconnectAll() error {
-	resp, err := wshclient.ConnStatusCommand(RpcClient, nil)
-	if err != nil {
-		return fmt.Errorf("getting connection status: %w", err)
-	}
-	if len(resp) == 0 {
-		return nil
-	}
-	for _, conn := range resp {
-		if conn.Status == "connected" {
-			err := connDisconnect(conn.Connection)
-			if err != nil {
-				WriteStdout("error disconnecting %q: %v\n", conn.Connection, err)
-			}
+func connReinstallRun(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		if RpcContext.Conn == "" {
+			return fmt.Errorf("no connection specified")
 		}
+		args = []string{RpcContext.Conn}
 	}
-	return nil
-}
-
-func connEnsure(connName string) error {
-	err := wshclient.ConnEnsureCommand(RpcClient, connName, &wshrpc.RpcOpts{Timeout: 60000})
-	if err != nil {
-		return fmt.Errorf("ensuring connection: %w", err)
+	connName := args[0]
+	if err := validateConnectionName(connName); err != nil {
+		return err
 	}
-	WriteStdout("wsh ensured on connection %q\n", connName)
-	return nil
-}
-
-func connReinstall(connName string) error {
-	err := wshclient.ConnReinstallWshCommand(RpcClient, connName, &wshrpc.RpcOpts{Timeout: 60000})
+	data := wshrpc.ConnExtData{
+		ConnName:   connName,
+		LogBlockId: RpcContext.BlockId,
+	}
+	err := wshclient.ConnReinstallWshCommand(RpcClient, data, &wshrpc.RpcOpts{Timeout: 60000})
 	if err != nil {
 		return fmt.Errorf("reinstalling connection: %w", err)
 	}
@@ -83,7 +145,11 @@ func connReinstall(connName string) error {
 	return nil
 }
 
-func connDisconnect(connName string) error {
+func connDisconnectRun(cmd *cobra.Command, args []string) error {
+	connName := args[0]
+	if err := validateConnectionName(connName); err != nil {
+		return err
+	}
 	err := wshclient.ConnDisconnectCommand(RpcClient, connName, &wshrpc.RpcOpts{Timeout: 10000})
 	if err != nil {
 		return fmt.Errorf("disconnecting %q error: %w", connName, err)
@@ -92,8 +158,35 @@ func connDisconnect(connName string) error {
 	return nil
 }
 
-func connConnect(connName string) error {
-	err := wshclient.ConnConnectCommand(RpcClient, connName, &wshrpc.RpcOpts{Timeout: 60000})
+func connDisconnectAllRun(cmd *cobra.Command, args []string) error {
+	allConns, err := getAllConnStatus()
+	if err != nil {
+		return err
+	}
+	for _, conn := range allConns {
+		if conn.Status != "connected" {
+			continue
+		}
+		err := wshclient.ConnDisconnectCommand(RpcClient, conn.Connection, &wshrpc.RpcOpts{Timeout: 10000})
+		if err != nil {
+			WriteStdout("error disconnecting %q: %v\n", conn.Connection, err)
+		} else {
+			WriteStdout("disconnected %q\n", conn.Connection)
+		}
+	}
+	return nil
+}
+
+func connConnectRun(cmd *cobra.Command, args []string) error {
+	connName := args[0]
+	if err := validateConnectionName(connName); err != nil {
+		return err
+	}
+	data := wshrpc.ConnRequest{
+		Host:       connName,
+		LogBlockId: RpcContext.BlockId,
+	}
+	err := wshclient.ConnConnectCommand(RpcClient, data, &wshrpc.RpcOpts{Timeout: 60000})
 	if err != nil {
 		return fmt.Errorf("connecting connection: %w", err)
 	}
@@ -101,32 +194,19 @@ func connConnect(connName string) error {
 	return nil
 }
 
-func connRun(cmd *cobra.Command, args []string) error {
-	connCmd := args[0]
-	var connName string
-	if connCmd != "status" && connCmd != "disconnectall" {
-		if len(args) < 2 {
-			return fmt.Errorf("connection name is required %q", connCmd)
-		}
-		connName = args[1]
-		_, err := remote.ParseOpts(connName)
-		if err != nil {
-			return fmt.Errorf("cannot parse connection name: %w", err)
-		}
+func connEnsureRun(cmd *cobra.Command, args []string) error {
+	connName := args[0]
+	if err := validateConnectionName(connName); err != nil {
+		return err
 	}
-	if connCmd == "status" {
-		return connStatus()
-	} else if connCmd == "ensure" {
-		return connEnsure(connName)
-	} else if connCmd == "reinstall" {
-		return connReinstall(connName)
-	} else if connCmd == "disconnect" {
-		return connDisconnect(connName)
-	} else if connCmd == "disconnectall" {
-		return connDisconnectAll()
-	} else if connCmd == "connect" {
-		return connConnect(connName)
-	} else {
-		return fmt.Errorf("unknown command %q", connCmd)
+	data := wshrpc.ConnExtData{
+		ConnName:   connName,
+		LogBlockId: RpcContext.BlockId,
 	}
+	err := wshclient.ConnEnsureCommand(RpcClient, data, &wshrpc.RpcOpts{Timeout: 60000})
+	if err != nil {
+		return fmt.Errorf("ensuring connection: %w", err)
+	}
+	WriteStdout("wsh ensured on connection %q\n", connName)
+	return nil
 }

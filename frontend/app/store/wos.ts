@@ -1,10 +1,12 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // WaveObjectStore
 
+import { waveEventSubscribe } from "@/app/store/wps";
 import { getWebServerEndpoint } from "@/util/endpoints";
 import { fetch } from "@/util/fetchutil";
+import { fireAndForget } from "@/util/util";
 import { atom, Atom, Getter, PrimitiveAtom, Setter, useAtomValue } from "jotai";
 import { useEffect } from "react";
 import { globalStore } from "./jotaiStore";
@@ -76,6 +78,16 @@ function debugLogBackendCall(methodName: string, durationStr: string, args: any[
     console.log("[service]", methodName, durationStr);
 }
 
+function wpsSubscribeToObject(oref: string): () => void {
+    return waveEventSubscribe({
+        eventType: "waveobj:update",
+        scope: oref,
+        handler: (event) => {
+            updateWaveObject(event.data);
+        },
+    });
+}
+
 function callBackendService(service: string, method: string, args: any[], noUIContext?: boolean): Promise<any> {
     const startTs = Date.now();
     let uiContext: UIContext = null;
@@ -129,6 +141,19 @@ function clearWaveObjectCache() {
 }
 
 const defaultHoldTime = 5000; // 5-seconds
+
+function reloadWaveObject<T extends WaveObj>(oref: string): Promise<T> {
+    let wov = waveObjectValueCache.get(oref);
+    if (wov === undefined) {
+        wov = getWaveObjectValue<T>(oref, true);
+        return wov.pendingPromise;
+    }
+    const prtn = GetObject<T>(oref);
+    prtn.then((val) => {
+        globalStore.set(wov.dataAtom, { value: val, loading: false });
+    });
+    return prtn;
+}
 
 function createWaveValueObject<T extends WaveObj>(oref: string, shouldFetch: boolean): WaveObjectValue<T> {
     const wov = { pendingPromise: null, dataAtom: null, refCount: 0, holdTime: Date.now() + 5000 };
@@ -277,7 +302,7 @@ function setObjectValue<T extends WaveObj>(value: T, setFn?: Setter, pushToServe
     }
     setFn(wov.dataAtom, { value: value, loading: false });
     if (pushToServer) {
-        ObjectService.UpdateObject(value, false);
+        fireAndForget(() => ObjectService.UpdateObject(value, false));
     }
 }
 
@@ -290,8 +315,11 @@ export {
     getWaveObjectLoadingAtom,
     loadAndPinWaveObject,
     makeORef,
+    reloadWaveObject,
     setObjectValue,
+    splitORef,
     updateWaveObject,
     updateWaveObjects,
     useWaveObjectValue,
+    wpsSubscribeToObject,
 };

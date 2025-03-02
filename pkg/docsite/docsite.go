@@ -1,3 +1,6 @@
+// Copyright 2025, Command Line Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 package docsite
 
 import (
@@ -9,11 +12,10 @@ import (
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 )
 
-var docsiteStaticPath = filepath.Join(wavebase.GetWaveAppPath(), "docsite")
-
 var docsiteHandler http.Handler
 
 func GetDocsiteHandler() http.Handler {
+	docsiteStaticPath := filepath.Join(wavebase.GetWaveAppPath(), "docsite")
 	stat, err := os.Stat(docsiteStaticPath)
 	if docsiteHandler == nil {
 		log.Println("Docsite is nil, initializing")
@@ -21,7 +23,7 @@ func GetDocsiteHandler() http.Handler {
 			log.Printf("Found static site at %s, serving\n", docsiteStaticPath)
 			docsiteHandler = http.FileServer(HTMLDir{http.Dir(docsiteStaticPath)})
 		} else {
-			log.Println("Did not find static site, serving not found handler")
+			log.Printf("Did not find static site at %s, serving not found handler. stat: %v, err: %v\n", docsiteStaticPath, stat, err)
 			docsiteHandler = http.NotFoundHandler()
 		}
 	}

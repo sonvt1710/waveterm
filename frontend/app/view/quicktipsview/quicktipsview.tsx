@@ -1,10 +1,10 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { QuickTips } from "@/app/element/quicktips";
 import { globalStore } from "@/app/store/global";
 import { Atom, atom, PrimitiveAtom } from "jotai";
-import "./quicktipsview.less";
+import "./quicktipsview.scss";
 
 class QuickTipsViewModel implements ViewModel {
     viewType: string;
@@ -16,13 +16,13 @@ class QuickTipsViewModel implements ViewModel {
         this.showTocAtom = atom(false);
     }
 
+    get viewComponent(): ViewComponent {
+        return QuickTipsView;
+    }
+
     showTocToggle() {
         globalStore.set(this.showTocAtom, !globalStore.get(this.showTocAtom));
     }
-}
-
-function makeQuickTipsViewModel() {
-    return new QuickTipsViewModel();
 }
 
 function QuickTipsView({ model }: { model: QuickTipsViewModel }) {
@@ -33,4 +33,4 @@ function QuickTipsView({ model }: { model: QuickTipsViewModel }) {
     );
 }
 
-export { makeQuickTipsViewModel, QuickTipsView, QuickTipsViewModel };
+export { QuickTipsViewModel };

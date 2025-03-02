@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { useTableNav } from "@table-nav/react";
@@ -14,7 +14,7 @@ import Papa from "papaparse";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useDimensionsWithExistingRef } from "@/app/hook/useDimensions";
-import "./csvview.less";
+import "./csvview.scss";
 
 const MAX_DATA_SIZE = 10 * 1024 * 1024; // 10MB in bytes
 

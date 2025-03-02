@@ -1,16 +1,16 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { MagnifyIcon } from "@/app/element/magnify";
-import { PLATFORM } from "@/app/store/global";
-import "./quicktips.less";
+import { PLATFORM, PlatformMacOS } from "@/util/platformutil";
+import "./quicktips.scss";
 
 const KeyBinding = ({ keyDecl }: { keyDecl: string }) => {
     const parts = keyDecl.split(":");
     const elems: React.ReactNode[] = [];
     for (let part of parts) {
         if (part === "Cmd") {
-            if (PLATFORM === "darwin") {
+            if (PLATFORM === PlatformMacOS) {
                 elems.push(
                     <div key="cmd" className="keybinding">
                         ⌘ Cmd
@@ -145,14 +145,44 @@ const QuickTips = () => {
                     </div>
                 </div>
 
+                <div className="tip-section-header">More Tips</div>
+                <div className="tip">
+                    <div className="icon-wrap">
+                        <i className="fa-solid fa-sharp fa-computer-mouse fa-fw" />
+                    </div>
+                    Right click the tabs to change backgrounds or rename.
+                </div>
+                <div className="tip">
+                    <div className="icon-wrap">
+                        <i className="fa-solid fa-sharp fa-cog fa-fw" />
+                    </div>
+                    Click the gear in the web view to set your homepage
+                </div>
+                <div className="tip">
+                    <div className="icon-wrap">
+                        <i className="fa-solid fa-sharp fa-cog fa-fw" />
+                    </div>
+                    Click the gear in the terminal to set your terminal theme and font size
+                </div>
                 <div className="tip-section-header">Need More Help?</div>
                 <div className="tip">
+                    <div className="icon-wrap">
+                        <i className="fa-brands fa-discord fa-fw" />
+                    </div>
                     <div>
-                        <div>
-                            <a target="_blank" href="https://discord.gg/XfvZ334gwU" rel="noopener">
-                                Join Our Discord
-                            </a>
-                        </div>
+                        <a target="_blank" href="https://discord.gg/XfvZ334gwU" rel="noopener">
+                            Join Our Discord
+                        </a>
+                    </div>
+                </div>
+                <div className="tip">
+                    <div className="icon-wrap">
+                        <i className="fa-solid fa-sharp fa-sliders fa-fw" />
+                    </div>
+                    <div>
+                        <a target="_blank" href="https://docs.waveterm.dev/config" rel="noopener">
+                            Configuration Options
+                        </a>
                     </div>
                 </div>
             </div>

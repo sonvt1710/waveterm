@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package tsgen
@@ -42,9 +42,13 @@ var ExtraTypes = []any{
 	wshutil.RpcMessage{},
 	wshrpc.WshServerCommandMeta{},
 	userinput.UserInputRequest{},
-	vdom.Elem{},
-	vdom.VDomFuncType{},
-	vdom.VDomRefType{},
+	vdom.VDomCreateContext{},
+	vdom.VDomElem{},
+	vdom.VDomFunc{},
+	vdom.VDomRef{},
+	vdom.VDomBinding{},
+	vdom.VDomFrontendUpdate{},
+	vdom.VDomBackendUpdate{},
 	waveobj.MetaTSType{},
 }
 
@@ -57,7 +61,7 @@ var contextRType = reflect.TypeOf((*context.Context)(nil)).Elem()
 var errorRType = reflect.TypeOf((*error)(nil)).Elem()
 var anyRType = reflect.TypeOf((*interface{})(nil)).Elem()
 var metaRType = reflect.TypeOf((*waveobj.MetaMapType)(nil)).Elem()
-var metaSettingsType = reflect.TypeOf((*wconfig.MetaSettingsType)(nil)).Elem()
+var metaSettingsType = reflect.TypeOf((*wshrpc.MetaSettingsType)(nil)).Elem()
 var uiContextRType = reflect.TypeOf((*waveobj.UIContext)(nil)).Elem()
 var waveObjRType = reflect.TypeOf((*waveobj.WaveObj)(nil)).Elem()
 var updatesRtnRType = reflect.TypeOf(waveobj.UpdatesRtnType{})
@@ -126,6 +130,10 @@ func TypeToTSType(t reflect.Type, tsTypesMap map[reflect.Type]string) (string, [
 	case reflect.Bool:
 		return "boolean", nil
 	case reflect.Slice, reflect.Array:
+		// special case for byte slice, marshals to base64 encoded string
+		if t.Elem().Kind() == reflect.Uint8 {
+			return "string", nil
+		}
 		elemType, subTypes := TypeToTSType(t.Elem(), tsTypesMap)
 		if elemType == "" {
 			return "", nil
@@ -168,24 +176,32 @@ var tsRenameMap = map[string]string{
 	"MetaSettingsType": "SettingsType",
 }
 
-func generateTSTypeInternal(rtype reflect.Type, tsTypesMap map[reflect.Type]string) (string, []reflect.Type) {
+func generateTSTypeInternal(rtype reflect.Type, tsTypesMap map[reflect.Type]string, embedded bool) (string, []reflect.Type) {
 	var buf bytes.Buffer
 	tsTypeName := rtype.Name()
 	if tsRename, ok := tsRenameMap[tsTypeName]; ok {
 		tsTypeName = tsRename
 	}
 	var isWaveObj bool
-	buf.WriteString(fmt.Sprintf("// %s\n", rtype.String()))
-	if rtype.Implements(waveObjRType) || reflect.PointerTo(rtype).Implements(waveObjRType) {
-		isWaveObj = true
-		buf.WriteString(fmt.Sprintf("type %s = WaveObj & {\n", tsTypeName))
-	} else {
-		buf.WriteString(fmt.Sprintf("type %s = {\n", tsTypeName))
+	if !embedded {
+		buf.WriteString(fmt.Sprintf("// %s\n", rtype.String()))
+		if rtype.Implements(waveObjRType) || reflect.PointerTo(rtype).Implements(waveObjRType) {
+			isWaveObj = true
+			buf.WriteString(fmt.Sprintf("type %s = WaveObj & {\n", tsTypeName))
+		} else {
+			buf.WriteString(fmt.Sprintf("type %s = {\n", tsTypeName))
+		}
 	}
 	var subTypes []reflect.Type
 	for i := 0; i < rtype.NumField(); i++ {
 		field := rtype.Field(i)
 		if field.PkgPath != "" {
+			continue
+		}
+		if field.Anonymous {
+			embeddedBuf, embeddedTypes := generateTSTypeInternal(field.Type, tsTypesMap, true)
+			buf.WriteString(embeddedBuf)
+			subTypes = append(subTypes, embeddedTypes...)
 			continue
 		}
 		fieldName := getTSFieldName(field)
@@ -217,7 +233,9 @@ func generateTSTypeInternal(rtype reflect.Type, tsTypesMap map[reflect.Type]stri
 		}
 		buf.WriteString(fmt.Sprintf("    %s%s: %s;\n", fieldName, optMarker, tsType))
 	}
-	buf.WriteString("};\n")
+	if !embedded {
+		buf.WriteString("};\n")
+	}
 	return buf.String(), subTypes
 }
 
@@ -295,7 +313,7 @@ func GenerateTSType(rtype reflect.Type, tsTypesMap map[reflect.Type]string) {
 	if rtype.Kind() != reflect.Struct {
 		return
 	}
-	tsType, subTypes := generateTSTypeInternal(rtype, tsTypesMap)
+	tsType, subTypes := generateTSTypeInternal(rtype, tsTypesMap, false)
 	tsTypesMap[rtype] = tsType
 	for _, subType := range subTypes {
 		GenerateTSType(subType, tsTypesMap)
@@ -354,7 +372,7 @@ func GenerateMethodSignature(serviceName string, method reflect.Method, meta tsg
 		wroteArg = true
 	}
 	sb.WriteString("): ")
-	wroteRtn := false
+	rtnTypes := []string{}
 	for idx := 0; idx < method.Type.NumOut(); idx++ {
 		outType := method.Type.Out(idx)
 		if outType == errorRType {
@@ -364,11 +382,14 @@ func GenerateMethodSignature(serviceName string, method reflect.Method, meta tsg
 			continue
 		}
 		tsTypeName, _ := TypeToTSType(outType, tsTypesMap)
-		sb.WriteString(fmt.Sprintf("Promise<%s>", tsTypeName))
-		wroteRtn = true
+		rtnTypes = append(rtnTypes, tsTypeName)
 	}
-	if !wroteRtn {
+	if len(rtnTypes) == 0 {
 		sb.WriteString("Promise<void>")
+	} else if len(rtnTypes) == 1 {
+		sb.WriteString(fmt.Sprintf("Promise<%s>", rtnTypes[0]))
+	} else {
+		sb.WriteString(fmt.Sprintf("Promise<[%s]>", strings.Join(rtnTypes, ", ")))
 	}
 	sb.WriteString(" {\n")
 	return sb.String()

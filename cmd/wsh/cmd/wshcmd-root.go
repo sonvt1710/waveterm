@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package cmd
@@ -7,14 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"runtime/debug"
-	"strconv"
-	"strings"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/wavetermdev/waveterm/pkg/util/shellutil"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc/wshclient"
@@ -30,56 +26,137 @@ var (
 	}
 )
 
-var usingHtmlMode bool
 var WrappedStdin io.Reader = os.Stdin
+var WrappedStdout io.Writer = &WrappedWriter{dest: os.Stdout}
+var WrappedStderr io.Writer = &WrappedWriter{dest: os.Stderr}
 var RpcClient *wshutil.WshRpc
 var RpcContext wshrpc.RpcContext
 var UsingTermWshMode bool
 var blockArg string
+var WshExitCode int
 
-func extraShutdownFn() {
-	if usingHtmlMode {
-		cmd := &wshrpc.CommandSetMetaData{
-			Meta: map[string]any{"term:mode": nil},
-		}
-		RpcClient.SendCommand(wshrpc.Command_SetMeta, cmd, nil)
-		time.Sleep(10 * time.Millisecond)
+type WrappedWriter struct {
+	dest io.Writer
+}
+
+func (w *WrappedWriter) Write(p []byte) (n int, err error) {
+	if !UsingTermWshMode {
+		return w.dest.Write(p)
 	}
+	count := 0
+	for _, b := range p {
+		if b == '\n' {
+			count++
+		}
+	}
+	if count == 0 {
+		return w.dest.Write(p)
+	}
+	buf := make([]byte, len(p)+count) // Each '\n' adds one extra byte for '\r'
+	writeIdx := 0
+	for _, b := range p {
+		if b == '\n' {
+			buf[writeIdx] = '\r'
+			buf[writeIdx+1] = '\n'
+			writeIdx += 2
+		} else {
+			buf[writeIdx] = b
+			writeIdx++
+		}
+	}
+	return w.dest.Write(buf)
 }
 
 func WriteStderr(fmtStr string, args ...interface{}) {
-	output := fmt.Sprintf(fmtStr, args...)
-	if UsingTermWshMode {
-		output = strings.ReplaceAll(output, "\n", "\r\n")
-	}
-	fmt.Fprint(os.Stderr, output)
+	WrappedStderr.Write([]byte(fmt.Sprintf(fmtStr, args...)))
 }
 
 func WriteStdout(fmtStr string, args ...interface{}) {
-	output := fmt.Sprintf(fmtStr, args...)
-	if UsingTermWshMode {
-		output = strings.ReplaceAll(output, "\n", "\r\n")
-	}
-	fmt.Print(output)
+	WrappedStdout.Write([]byte(fmt.Sprintf(fmtStr, args...)))
+}
+
+func OutputHelpMessage(cmd *cobra.Command) {
+	cmd.SetOutput(WrappedStderr)
+	cmd.Help()
+	WriteStderr("\n")
 }
 
 func preRunSetupRpcClient(cmd *cobra.Command, args []string) error {
-	err := setupRpcClient(nil)
+	jwtToken := os.Getenv(wshutil.WaveJwtTokenVarName)
+	if jwtToken == "" {
+		wshutil.SetTermRawModeAndInstallShutdownHandlers(true)
+		UsingTermWshMode = true
+		RpcClient, WrappedStdin = wshutil.SetupTerminalRpcClient(nil, "wshcmd-termclient")
+		return nil
+	}
+	err := setupRpcClient(nil, jwtToken)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-// returns the wrapped stdin and a new rpc client (that wraps the stdin input and stdout output)
-func setupRpcClient(serverImpl wshutil.ServerImpl) error {
-	jwtToken := os.Getenv(wshutil.WaveJwtTokenVarName)
-	if jwtToken == "" {
-		wshutil.SetTermRawModeAndInstallShutdownHandlers(true)
-		UsingTermWshMode = true
-		RpcClient, WrappedStdin = wshutil.SetupTerminalRpcClient(serverImpl)
-		return nil
+func getIsTty() bool {
+	if fileInfo, _ := os.Stdout.Stat(); (fileInfo.Mode() & os.ModeCharDevice) != 0 {
+		return true
 	}
+	return false
+}
+
+func getThisBlockMeta() (waveobj.MetaMapType, error) {
+	blockORef := waveobj.ORef{OType: waveobj.OType_Block, OID: RpcContext.BlockId}
+	resp, err := wshclient.GetMetaCommand(RpcClient, wshrpc.CommandGetMetaData{ORef: blockORef}, &wshrpc.RpcOpts{Timeout: 2000})
+	if err != nil {
+		return nil, fmt.Errorf("getting metadata: %w", err)
+	}
+	return resp, nil
+}
+
+type RunEFnType = func(*cobra.Command, []string) error
+
+func activityWrap(activityStr string, origRunE RunEFnType) RunEFnType {
+	return func(cmd *cobra.Command, args []string) (rtnErr error) {
+		defer func() {
+			sendActivity(activityStr, rtnErr == nil)
+		}()
+		return origRunE(cmd, args)
+	}
+}
+
+func resolveBlockArg() (*waveobj.ORef, error) {
+	oref := blockArg
+	if oref == "" {
+		oref = "this"
+	}
+	fullORef, err := resolveSimpleId(oref)
+	if err != nil {
+		return nil, fmt.Errorf("resolving blockid: %w", err)
+	}
+	return fullORef, nil
+}
+
+func setupRpcClientWithToken(swapTokenStr string) (wshrpc.CommandAuthenticateRtnData, error) {
+	var rtn wshrpc.CommandAuthenticateRtnData
+	token, err := shellutil.UnpackSwapToken(swapTokenStr)
+	if err != nil {
+		return rtn, fmt.Errorf("error unpacking token: %w", err)
+	}
+	if token.SockName == "" {
+		return rtn, fmt.Errorf("no sockname in token")
+	}
+	if token.RpcContext == nil {
+		return rtn, fmt.Errorf("no rpccontext in token")
+	}
+	RpcContext = *token.RpcContext
+	RpcClient, err = wshutil.SetupDomainSocketRpcClient(token.SockName, nil, "wshcmd")
+	if err != nil {
+		return rtn, fmt.Errorf("error setting up domain socket rpc client: %w", err)
+	}
+	return wshclient.AuthenticateTokenCommand(RpcClient, wshrpc.CommandAuthenticateTokenData{Token: token.Token}, nil)
+}
+
+// returns the wrapped stdin and a new rpc client (that wraps the stdin input and stdout output)
+func setupRpcClient(serverImpl wshutil.ServerImpl, jwtToken string) error {
 	rpcCtx, err := wshutil.ExtractUnverifiedRpcContext(jwtToken)
 	if err != nil {
 		return fmt.Errorf("error extracting rpc context from %s: %v", wshutil.WaveJwtTokenVarName, err)
@@ -89,53 +166,12 @@ func setupRpcClient(serverImpl wshutil.ServerImpl) error {
 	if err != nil {
 		return fmt.Errorf("error extracting socket name from %s: %v", wshutil.WaveJwtTokenVarName, err)
 	}
-	RpcClient, err = wshutil.SetupDomainSocketRpcClient(sockName, serverImpl)
+	RpcClient, err = wshutil.SetupDomainSocketRpcClient(sockName, serverImpl, "wshcmd")
 	if err != nil {
 		return fmt.Errorf("error setting up domain socket rpc client: %v", err)
 	}
 	wshclient.AuthenticateCommand(RpcClient, jwtToken, &wshrpc.RpcOpts{NoResponse: true})
 	// note we don't modify WrappedStdin here (just use os.Stdin)
-	return nil
-}
-
-func setTermHtmlMode() {
-	wshutil.SetExtraShutdownFunc(extraShutdownFn)
-	cmd := &wshrpc.CommandSetMetaData{
-		Meta: map[string]any{"term:mode": "html"},
-	}
-	err := RpcClient.SendCommand(wshrpc.Command_SetMeta, cmd, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting html mode: %v\r\n", err)
-	}
-	usingHtmlMode = true
-}
-
-var oidRe = regexp.MustCompile(`^[0-9a-f]{8}$`)
-
-func validateEasyORef(oref string) error {
-	if oref == "this" || oref == "tab" {
-		return nil
-	}
-	if num, err := strconv.Atoi(oref); err == nil && num >= 1 {
-		return nil
-	}
-	if strings.Contains(oref, ":") {
-		_, err := waveobj.ParseORef(oref)
-		if err != nil {
-			return fmt.Errorf("invalid ORef: %v", err)
-		}
-		return nil
-	}
-	if len(oref) == 8 {
-		if !oidRe.MatchString(oref) {
-			return fmt.Errorf("invalid short OID format, must only use 0-9a-f: %q", oref)
-		}
-		return nil
-	}
-	_, err := uuid.Parse(oref)
-	if err != nil {
-		return fmt.Errorf("invalid object reference (must be UUID, or a positive integer): %v", err)
-	}
 	return nil
 }
 
@@ -163,6 +199,23 @@ func resolveSimpleId(id string) (*waveobj.ORef, error) {
 	return &oref, nil
 }
 
+// this will send wsh activity to the client running on *your* local machine (it does not contact any wave cloud infrastructure)
+// if you've turned off telemetry in your local client, this data never gets sent to us
+// no parameters or timestamps are sent, as you can see below, it just sends the name of the command (and if there was an error)
+// (e.g. "wsh ai ..." would send "ai")
+// this helps us understand which commands are actually being used so we know where to concentrate our effort
+func sendActivity(wshCmdName string, success bool) {
+	if RpcClient == nil || wshCmdName == "" {
+		return
+	}
+	dataMap := make(map[string]int)
+	dataMap[wshCmdName] = 1
+	if !success {
+		dataMap[wshCmdName+"#"+"error"] = 1
+	}
+	wshclient.WshActivityCommand(RpcClient, dataMap, nil)
+}
+
 // Execute executes the root command.
 func Execute() {
 	defer func() {
@@ -172,10 +225,10 @@ func Execute() {
 			debug.PrintStack()
 			wshutil.DoShutdown("", 1, true)
 		} else {
-			wshutil.DoShutdown("", 0, false)
+			wshutil.DoShutdown("", WshExitCode, false)
 		}
 	}()
-	rootCmd.PersistentFlags().StringVarP(&blockArg, "block", "b", "this", "for commands which require a block id")
+	rootCmd.PersistentFlags().StringVarP(&blockArg, "block", "b", "", "for commands which require a block id")
 	err := rootCmd.Execute()
 	if err != nil {
 		wshutil.DoShutdown("", 1, true)

@@ -1,7 +1,7 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { contextBridge, ipcRenderer, WebviewTag } from "electron";
+import { contextBridge, ipcRenderer, Rectangle, WebviewTag } from "electron";
 
 contextBridge.exposeInMainWorld("api", {
     getAuthKey: () => ipcRenderer.sendSync("get-auth-key"),
@@ -10,11 +10,13 @@ contextBridge.exposeInMainWorld("api", {
     getCursorPoint: () => ipcRenderer.sendSync("get-cursor-point"),
     getUserName: () => ipcRenderer.sendSync("get-user-name"),
     getHostName: () => ipcRenderer.sendSync("get-host-name"),
+    getDataDir: () => ipcRenderer.sendSync("get-data-dir"),
+    getConfigDir: () => ipcRenderer.sendSync("get-config-dir"),
     getAboutModalDetails: () => ipcRenderer.sendSync("get-about-modal-details"),
     getDocsiteUrl: () => ipcRenderer.sendSync("get-docsite-url"),
     getWebviewPreload: () => ipcRenderer.sendSync("get-webview-preload"),
     openNewWindow: () => ipcRenderer.send("open-new-window"),
-    showContextMenu: (menu, position) => ipcRenderer.send("contextmenu-show", menu, position),
+    showContextMenu: (workspaceId, menu) => ipcRenderer.send("contextmenu-show", workspaceId, menu),
     onContextMenuClick: (callback) => ipcRenderer.on("contextmenu-click", (_event, id) => callback(id)),
     downloadFile: (filePath) => ipcRenderer.send("download", { filePath }),
     openExternal: (url) => {
@@ -38,7 +40,19 @@ contextBridge.exposeInMainWorld("api", {
     registerGlobalWebviewKeys: (keys) => ipcRenderer.send("register-global-webview-keys", keys),
     onControlShiftStateUpdate: (callback) =>
         ipcRenderer.on("control-shift-state-update", (_event, state) => callback(state)),
+    createWorkspace: () => ipcRenderer.send("create-workspace"),
+    switchWorkspace: (workspaceId) => ipcRenderer.send("switch-workspace", workspaceId),
+    deleteWorkspace: (workspaceId) => ipcRenderer.send("delete-workspace", workspaceId),
+    setActiveTab: (tabId) => ipcRenderer.send("set-active-tab", tabId),
+    createTab: () => ipcRenderer.send("create-tab"),
+    closeTab: (workspaceId, tabId) => ipcRenderer.send("close-tab", workspaceId, tabId),
+    setWindowInitStatus: (status) => ipcRenderer.send("set-window-init-status", status),
+    onWaveInit: (callback) => ipcRenderer.on("wave-init", (_event, initOpts) => callback(initOpts)),
+    sendLog: (log) => ipcRenderer.send("fe-log", log),
     onQuicklook: (filePath: string) => ipcRenderer.send("quicklook", filePath),
+    openNativePath: (filePath: string) => ipcRenderer.send("open-native-path", filePath),
+    captureScreenshot: (rect: Rectangle) => ipcRenderer.invoke("capture-screenshot", rect),
+    setKeyboardChordMode: () => ipcRenderer.send("set-keyboard-chord-mode"),
 });
 
 // Custom event for "new-window"

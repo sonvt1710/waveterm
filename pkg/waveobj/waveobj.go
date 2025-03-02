@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package waveobj
@@ -86,12 +86,23 @@ func ParseORef(orefStr string) (ORef, error) {
 	if !otypeRe.MatchString(otype) {
 		return ORef{}, fmt.Errorf("invalid object type: %q", otype)
 	}
+	if !ValidOTypes[otype] {
+		return ORef{}, fmt.Errorf("unknown object type: %q", otype)
+	}
 	oid := fields[1]
 	_, err := uuid.Parse(oid)
 	if err != nil {
 		return ORef{}, fmt.Errorf("invalid object id: %q", oid)
 	}
 	return ORef{OType: otype, OID: oid}, nil
+}
+
+func ParseORefNoErr(orefStr string) *ORef {
+	oref, err := ParseORef(orefStr)
+	if err != nil {
+		return nil
+	}
+	return &oref
 }
 
 type WaveObj interface {

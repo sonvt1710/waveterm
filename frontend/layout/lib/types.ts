@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { Atom, WritableAtom } from "jotai";
@@ -70,6 +70,9 @@ export enum LayoutTreeActionType {
     FocusNode = "focus",
     MagnifyNodeToggle = "magnify",
     ClearTree = "clear",
+    ReplaceNode = "replace",
+    SplitHorizontal = "splithorizontal",
+    SplitVertical = "splitvertical",
 }
 
 /**
@@ -185,6 +188,34 @@ export interface LayoutTreeCommitPendingAction extends LayoutTreeAction {
  */
 export interface LayoutTreeClearPendingAction extends LayoutTreeAction {
     type: LayoutTreeActionType.ClearPendingAction;
+}
+
+// ReplaceNode: replace an existing node in place with a new one.
+export interface LayoutTreeReplaceNodeAction extends LayoutTreeAction {
+    type: LayoutTreeActionType.ReplaceNode;
+    targetNodeId: string;
+    newNode: LayoutNode;
+    focused?: boolean;
+}
+
+// SplitHorizontal: split the current block horizontally.
+// The "position" field indicates whether the new node should be inserted before (to the left)
+// or after (to the right) of the target node.
+export interface LayoutTreeSplitHorizontalAction extends LayoutTreeAction {
+    type: LayoutTreeActionType.SplitHorizontal;
+    targetNodeId: string;
+    newNode: LayoutNode;
+    position: "before" | "after";
+    focused?: boolean;
+}
+
+// SplitVertical: similar to split horizontal but along the vertical axis.
+export interface LayoutTreeSplitVerticalAction extends LayoutTreeAction {
+    type: LayoutTreeActionType.SplitVertical;
+    targetNodeId: string;
+    newNode: LayoutNode;
+    position: "before" | "after";
+    focused?: boolean;
 }
 
 /**
@@ -332,8 +363,6 @@ export interface LayoutNodeAdditionalProps {
     rect?: Dimensions;
     pixelToSizeRatio?: number;
     resizeHandles?: ResizeHandleProps[];
-    isMagnifiedNode?: boolean;
-    isLastMagnifiedNode?: boolean;
 }
 
 export interface NodeModel {
@@ -343,10 +372,12 @@ export interface NodeModel {
     numLeafs: Atom<number>;
     nodeId: string;
     blockId: string;
+    addEphemeralNodeToLayout: () => void;
     animationTimeS: Atom<number>;
     isResizing: Atom<boolean>;
     isFocused: Atom<boolean>;
     isMagnified: Atom<boolean>;
+    isEphemeral: Atom<boolean>;
     ready: Atom<boolean>;
     disablePointerEvents: Atom<boolean>;
     toggleMagnify: () => void;

@@ -1,12 +1,11 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import { useOnResize } from "@/app/hook/useDimensions";
 import { atoms, globalStore, WOS } from "@/app/store/global";
 import { fireAndForget } from "@/util/util";
-import useResizeObserver from "@react-hook/resize-observer";
 import { Atom, useAtomValue } from "jotai";
-import { CSSProperties, useCallback, useEffect, useLayoutEffect, useState } from "react";
-import { debounce } from "throttle-debounce";
+import { CSSProperties, useCallback, useEffect, useState } from "react";
 import { withLayoutTreeStateAtomFromTab } from "./layoutAtom";
 import { LayoutModel } from "./layoutModel";
 import { LayoutNode, NodeModel, TileLayoutContents } from "./types";
@@ -25,7 +24,7 @@ export function getLayoutModelForTab(tabAtom: Atom<Tab>): LayoutModel {
     }
     const layoutTreeStateAtom = withLayoutTreeStateAtomFromTab(tabAtom);
     const layoutModel = new LayoutModel(layoutTreeStateAtom, globalStore.get, globalStore.set);
-    globalStore.sub(layoutTreeStateAtom, () => fireAndForget(async () => layoutModel.onTreeStateAtomUpdated()));
+    globalStore.sub(layoutTreeStateAtom, () => fireAndForget(layoutModel.onTreeStateAtomUpdated.bind(layoutModel)));
     layoutModelMap.set(tabId, layoutModel);
     return layoutModel;
 }
@@ -36,8 +35,8 @@ export function getLayoutModelForTabById(tabId: string) {
     return getLayoutModelForTab(tabAtom);
 }
 
-export function getLayoutModelForActiveTab() {
-    const tabId = globalStore.get(atoms.activeTabId);
+export function getLayoutModelForStaticTab() {
+    const tabId = globalStore.get(atoms.staticTabId);
     return getLayoutModelForTabById(tabId);
 }
 
@@ -53,10 +52,11 @@ export function useTileLayout(tabAtom: Atom<Tab>, tileContent: TileLayoutContent
     // Use tab data to ensure we can reload if the tab is disposed and remade (such as during Hot Module Reloading)
     useAtomValue(tabAtom);
     const layoutModel = useLayoutModel(tabAtom);
-    useResizeObserver(layoutModel?.displayContainerRef, layoutModel?.onContainerResize);
+
+    useOnResize(layoutModel?.displayContainerRef, layoutModel?.onContainerResize);
 
     // Once the TileLayout is mounted, re-run the state update to get all the nodes to flow in the layout.
-    useEffect(() => fireAndForget(async () => layoutModel.onTreeStateAtomUpdated(true)), []);
+    useEffect(() => fireAndForget(() => layoutModel.onTreeStateAtomUpdated(true)), []);
 
     useEffect(() => layoutModel.registerTileLayout(tileContent), [tileContent]);
     return layoutModel;
@@ -73,16 +73,29 @@ export function useDebouncedNodeInnerRect(nodeModel: NodeModel): CSSProperties {
     const isResizing = useAtomValue(nodeModel.isResizing);
     const prefersReducedMotion = useAtomValue(atoms.prefersReducedMotionAtom);
     const [innerRect, setInnerRect] = useState<CSSProperties>();
+    const [innerRectDebounceTimeout, setInnerRectDebounceTimeout] = useState<NodeJS.Timeout>();
 
     const setInnerRectDebounced = useCallback(
-        debounce(animationTimeS * 1000, (nodeInnerRect) => {
-            setInnerRect(nodeInnerRect);
-        }),
+        (nodeInnerRect: CSSProperties) => {
+            clearInnerRectDebounce();
+            setInnerRectDebounceTimeout(
+                setTimeout(() => {
+                    setInnerRect(nodeInnerRect);
+                }, animationTimeS * 1000)
+            );
+        },
         [animationTimeS]
     );
+    const clearInnerRectDebounce = useCallback(() => {
+        if (innerRectDebounceTimeout) {
+            clearTimeout(innerRectDebounceTimeout);
+            setInnerRectDebounceTimeout(undefined);
+        }
+    }, [innerRectDebounceTimeout]);
 
-    useLayoutEffect(() => {
+    useEffect(() => {
         if (prefersReducedMotion || isMagnified || isResizing) {
+            clearInnerRectDebounce();
             setInnerRect(nodeInnerRect);
         } else {
             setInnerRectDebounced(nodeInnerRect);

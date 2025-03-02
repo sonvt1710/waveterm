@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import Logo from "@/app/asset/logo.svg";
@@ -12,33 +12,31 @@ import { FlexiModal } from "./modal";
 import { QuickTips } from "@/app/element/quicktips";
 import { atoms, getApi } from "@/app/store/global";
 import { modalsModel } from "@/app/store/modalmodel";
+import { fireAndForget } from "@/util/util";
 import { atom, PrimitiveAtom, useAtom, useAtomValue, useSetAtom } from "jotai";
-import "./tos.less";
+import "./tos.scss";
 
 const pageNumAtom: PrimitiveAtom<number> = atom<number>(1);
 
 const ModalPage1 = () => {
     const settings = useAtomValue(atoms.settingsAtom);
     const clientData = useAtomValue(atoms.client);
-    const [tosOpen, setTosOpen] = useAtom(modalsModel.tosOpen);
     const [telemetryEnabled, setTelemetryEnabled] = useState<boolean>(!!settings["telemetry:enabled"]);
     const setPageNum = useSetAtom(pageNumAtom);
 
     const acceptTos = () => {
         if (!clientData.tosagreed) {
-            services.ClientService.AgreeTos();
+            fireAndForget(services.ClientService.AgreeTos);
         }
         setPageNum(2);
     };
 
     const setTelemetry = (value: boolean) => {
-        services.ClientService.TelemetryUpdate(value)
-            .then(() => {
+        fireAndForget(() =>
+            services.ClientService.TelemetryUpdate(value).then(() => {
                 setTelemetryEnabled(value);
             })
-            .catch((error) => {
-                console.error("failed to set telemetry:", error);
-            });
+        );
     };
 
     const label = telemetryEnabled ? "Telemetry Enabled" : "Telemetry Disabled";
@@ -95,7 +93,7 @@ const ModalPage1 = () => {
                         <div className="content-section-title">Telemetry</div>
                         <div className="content-section-text">
                             We collect minimal anonymous{" "}
-                            <a target="_blank" href="https://docs.waveterm.dev/reference/telemetry" rel={"noopener"}>
+                            <a target="_blank" href="https://docs.waveterm.dev/telemetry" rel={"noopener"}>
                                 telemetry data
                             </a>{" "}
                             to help us understand how people are using Wave (
@@ -167,18 +165,18 @@ const ModalPageLegacy = () => {
                 <div className="logo">
                     <Logo />
                 </div>
-                <div className="modal-title">Welcome to Wave v0.8</div>
+                <div className="modal-title">Welcome to Wave v0.9</div>
             </header>
             <div className="modal-content tos-content unselectable">
                 <div className="item">
-                    We’re excited to announce the release of Wave Terminal v0.8. This update introduces a brand-new
+                    We’re excited to announce the release of Wave Terminal v0.9. This update introduces a brand-new
                     layout engine, featuring drag-and-drop screen splitting with flexible block sizing and positioning.
                     We've also integrated powerful tools like file previews, an editor, web integration, and AI, all
                     designed to keep you focused and minimize context switching. And for the first time, Wave Terminal
                     runs <b>natively on Windows</b>!
                 </div>
                 <div>
-                    Wave v0.8 is less opinionated, giving you the freedom to use your standard terminal prompt and
+                    Wave v0.9 is less opinionated, giving you the freedom to use your standard terminal prompt and
                     command completions, while supporting all shells (not just bash/zsh). We've also improved
                     compatibility with ohmyzsh packages, removing some of the friction users experienced. It’s faster,
                     more performant, and provides a stronger foundation for you to build your own blocks and widgets in

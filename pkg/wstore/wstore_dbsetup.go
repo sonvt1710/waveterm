@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package wstore
@@ -42,7 +42,7 @@ func InitWStore() error {
 }
 
 func GetDBName() string {
-	waveHome := wavebase.GetWaveHomeDir()
+	waveHome := wavebase.GetWaveDataDir()
 	return filepath.Join(waveHome, wavebase.WaveDBDir, WStoreDBName)
 }
 

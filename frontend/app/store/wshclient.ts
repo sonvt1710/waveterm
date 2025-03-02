@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { sendRpcCommand, sendRpcResponse } from "@/app/store/wshrpcutil";
@@ -16,6 +16,10 @@ class RpcResponseHelper {
         this.cmdMsg = cmdMsg;
         // if reqid is null, no response required
         this.done = cmdMsg.reqid == null;
+    }
+
+    getSource(): string {
+        return this.cmdMsg?.source;
     }
 
     sendResponse(msg: RpcMessage) {

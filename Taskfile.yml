@@ -13,37 +13,99 @@ vars:
     DATE: '{{if eq OS "windows"}}powershell Get-Date -UFormat{{else}}date{{end}}'
     ARTIFACTS_BUCKET: waveterm-github-artifacts/staging-w2
     RELEASES_BUCKET: dl.waveterm.dev/releases-w2
+    WINGET_PACKAGE: CommandLine.Wave
 
 tasks:
     electron:dev:
         desc: Run the Electron application via the Vite dev server (enables hot reloading).
         cmd: yarn dev
+        aliases:
+            - dev
         deps:
             - yarn
+            - docsite:build:embedded
             - build:backend
         env:
-            WCLOUD_ENDPOINT: "https://ot2e112zx5.execute-api.us-west-2.amazonaws.com/dev"
-            WCLOUD_WS_ENDPOINT: "wss://5lfzlg5crl.execute-api.us-west-2.amazonaws.com/dev/"
+            WCLOUD_ENDPOINT: "https://api-dev.waveterm.dev/central"
+            WCLOUD_WS_ENDPOINT: "wss://wsapi-dev.waveterm.dev/"
 
     electron:start:
         desc: Run the Electron application directly.
         cmd: yarn start
+        aliases:
+            - start
         deps:
             - yarn
+            - docsite:build:embedded
             - build:backend
+        env:
+            WCLOUD_ENDPOINT: "https://api-dev.waveterm.dev"
+            WCLOUD_WS_ENDPOINT: "wss://wsapi-dev.waveterm.dev"
 
     storybook:
         desc: Start the Storybook server.
         cmd: yarn storybook
+        deps:
+            - yarn
+
+    storybook:build:
+        desc: Build the Storybook static site.
+        cmd: yarn build-storybook
+        generates:
+            - storybook-static/**/*
+        deps:
+            - yarn
+
+    docsite:start:
+        desc: Start the docsite dev server.
+        cmd: yarn start
+        dir: docs
+        aliases:
+            - docsite
+        deps:
+            - yarn
+
+    docsite:build:public:
+        desc: Build the full docsite.
+        cmds:
+            - cd docs && yarn build
+            - task: copyfiles:'storybook-static':'docs/build/storybook'
+        sources:
+            - "docs/*"
+            - "docs/src/**/*"
+            - "docs/docs/**/*"
+            - "docs/static/**/*"
+            - storybook-static/**/*
+        generates:
+            - "docs/build/**/*"
+        deps:
+            - yarn
+            - storybook:build
+
+    docsite:build:embedded:
+        desc: Build the embedded docsite and copy it to dist/docsite
+        sources:
+            - "docs/*"
+            - "docs/src/**/*"
+            - "docs/docs/**/*"
+            - "docs/static/**/*"
+        generates:
+            - "dist/docsite/**/*"
+        cmds:
+            - cd docs && yarn build-embedded
+            - task: copyfiles:'docs/build/':'dist/docsite'
+        deps:
+            - yarn
 
     package:
         desc: Package the application for the current platform.
         cmds:
             - cmd: '{{.RMRF}} "make"'
               ignore_error: true
-            - yarn build:prod && yarn electron-builder -c electron-builder.config.cjs -p never
+            - yarn build:prod && yarn electron-builder -c electron-builder.config.cjs -p never {{.CLI_ARGS}}
         deps:
             - yarn
+            - docsite:build:embedded
             - build:backend
 
     build:backend:
@@ -52,18 +114,38 @@ tasks:
             - task: build:server
             - task: build:wsh
 
+    build:schema:
+        desc: Build the schema for configuration.
+        sources:
+            - "cmd/generateschema/*.go"
+            - "pkg/wconfig/*.go"
+        generates:
+            - "dist/schema/**/*"
+        cmds:
+            - go run cmd/generateschema/main-generateschema.go
+            - cmd: '{{.RMRF}} "dist/schema"'
+              ignore_error: true
+            - task: copyfiles:'schema':'dist/schema'
+
     build:server:
         desc: Build the wavesrv component.
+        cmds:
+            - task: build:server:linux
+            - task: build:server:macos
+            - task: build:server:windows
         deps:
+            - go:mod:tidy
             - generate
-            - build:server:linux
-            - build:server:macos
-            - build:server:windows
+        sources:
+            - "cmd/server/*.go"
+            - "pkg/**/*.go"
+            - "pkg/**/*.json"
+        generates:
+            - dist/bin/wavesrv.*
 
     build:server:macos:
         desc: Build the wavesrv component for macOS (Darwin) platforms (generates artifacts for both arm64 and amd64).
-        status:
-            - exit {{if eq OS "darwin"}}1{{else}}0{{end}}
+        platforms: [darwin]
         cmds:
             - cmd: "{{.RM}} dist/bin/wavesrv*"
               ignore_error: true
@@ -73,20 +155,7 @@ tasks:
 
     build:server:windows:
         desc: Build the wavesrv component for Windows platforms (only generates artifacts for the current architecture).
-        status:
-            - exit {{if eq OS "windows"}}1{{else}}0{{end}}
-        cmds:
-            - cmd: "{{.RM}} dist/bin/wavesrv*"
-              ignore_error: true
-            - task: build:server:internal
-              vars:
-                  ARCHS:
-                      sh: echo {{if eq "arm" ARCH}}arm64{{else}}{{ARCH}}{{end}}
-
-    build:server:linux:
-        desc: Build the wavesrv component for Linux platforms (only generates artifacts for the current architecture).
-        status:
-            - exit {{if eq OS "linux"}}1{{else}}0{{end}}
+        platforms: [windows]
         cmds:
             - cmd: "{{.RM}} dist/bin/wavesrv*"
               ignore_error: true
@@ -95,7 +164,20 @@ tasks:
                   ARCHS:
                       sh: echo {{if eq "arm" ARCH}}arm64{{else}}{{ARCH}}{{end}}
                   GO_ENV_VARS:
-                      sh: echo "{{if eq "amd64" ARCH}}CC=\"zig cc -target x86_64-linux-gnu.2.28\"{{end}}"
+                      sh: echo "{{if eq "amd64" ARCH}}CC=\"zig cc -target x86_64-windows-gnu\"{{else}}CC=\"zig cc -target aarch64-windows-gnu\"{{end}}"
+
+    build:server:linux:
+        desc: Build the wavesrv component for Linux platforms (only generates artifacts for the current architecture).
+        platforms: [linux]
+        cmds:
+            - cmd: "{{.RM}} dist/bin/wavesrv*"
+              ignore_error: true
+            - task: build:server:internal
+              vars:
+                  ARCHS:
+                      sh: echo {{if eq "arm" ARCH}}arm64{{else}}{{ARCH}}{{end}}
+                  GO_ENV_VARS:
+                      sh: echo "{{if eq "amd64" ARCH}}CC=\"zig cc -target x86_64-linux-gnu.2.28\"{{else}}CC=\"zig cc -target aarch64-linux-gnu.2.28\"{{end}}"
 
     build:server:internal:
         requires:
@@ -107,13 +189,6 @@ tasks:
                 var: ARCHS
                 split: ","
                 as: GOARCH
-        sources:
-            - "cmd/server/*.go"
-            - "pkg/**/*.go"
-        generates:
-            - dist/bin/wavesrv.*{{exeExt}}
-        deps:
-            - go:mod:tidy
         internal: true
 
     build:wsh:
@@ -139,6 +214,14 @@ tasks:
                   GOARCH: amd64
             - task: build:wsh:internal
               vars:
+                  GOOS: linux
+                  GOARCH: mips
+            - task: build:wsh:internal
+              vars:
+                  GOOS: linux
+                  GOARCH: mips64
+            - task: build:wsh:internal
+              vars:
                   GOOS: windows
                   GOARCH: amd64
             - task: build:wsh:internal
@@ -146,19 +229,13 @@ tasks:
                   GOOS: windows
                   GOARCH: arm64
         deps:
+            - go:mod:tidy
             - generate
-
-    dev:installwsh:
-        desc: quick shortcut to rebuild wsh and install for macos arm64
-        requires:
-            vars:
-                - VERSION
-        cmds:
-            - task: build:wsh:internal
-              vars:
-                  GOOS: darwin
-                  GOARCH: arm64
-            - cp dist/bin/wsh-{{.VERSION}}-darwin.arm64 ~/.waveterm-dev/bin/wsh
+        sources:
+            - "cmd/wsh/**/*.go"
+            - "pkg/**/*.go"
+        generates:
+            - dist/bin/wsh-*
 
     build:wsh:internal:
         vars:
@@ -171,14 +248,7 @@ tasks:
                 - GOOS
                 - GOARCH
                 - VERSION
-        sources:
-            - "cmd/wsh/**/*.go"
-            - "pkg/**/*.go"
-        generates:
-            - dist/bin/wsh-{{.VERSION}}-{{.GOOS}}.{{.NORMALIZEDARCH}}{{.EXT}}
         cmd: (CGO_ENABLED=0 GOOS={{.GOOS}} GOARCH={{.GOARCH}} go build -ldflags="-s -w -X main.BuildTime=$({{.DATE}} +'%Y%m%d%H%M') -X main.WaveVersion={{.VERSION}}" -o dist/bin/wsh-{{.VERSION}}-{{.GOOS}}.{{.NORMALIZEDARCH}}{{.EXT}} cmd/wsh/main-wsh.go)
-        deps:
-            - go:mod:tidy
         internal: true
 
     generate:
@@ -186,6 +256,8 @@ tasks:
         cmds:
             - go run cmd/generatets/main-generatets.go
             - go run cmd/generatego/main-generatego.go
+        deps:
+            - build:schema
         sources:
             - "cmd/generatego/*.go"
             - "cmd/generatets/*.go"
@@ -229,6 +301,72 @@ tasks:
                     echo "https://$SUFFIX"
                 fi
             done
+    artifacts:snap:publish:*:
+        desc: Publishes the specified artifacts version to Snapcraft.
+        vars:
+            UP_VERSION: '{{ replace "v" "" (index .MATCH 0)}}'
+            CHANNEL: '{{if contains "beta" .UP_VERSION}}beta{{else}}beta,stable{{end}}'
+        cmd: |
+            echo "Releasing to channels: [{{.CHANNEL}}]"
+            for file in waveterm_{{.UP_VERSION}}_*.snap; do
+                echo "Publishing $file"
+                snapcraft upload --release={{.CHANNEL}} $file
+                echo "Finished publishing $file"
+            done
+
+    artifacts:winget:publish:*:
+        desc: Submits a version bump request to WinGet for the latest release.
+        status:
+            - exit {{if contains "beta" .UP_VERSION}}0{{else}}1{{end}}
+        vars:
+            UP_VERSION: '{{ replace "v" "" (index .MATCH 0)}}'
+        cmd: |
+            wingetcreate update {{.WINGET_PACKAGE}} -s -v {{.UP_VERSION}} -u "https://{{.RELEASES_BUCKET}}/{{.APP_NAME}}-win32-x64-{{.UP_VERSION}}.msi" -t {{.GITHUB_TOKEN}}
+
+    dev:installwsh:
+        desc: quick shortcut to rebuild wsh and install for macos arm64
+        requires:
+            vars:
+                - VERSION
+        cmds:
+            - task: build:wsh:internal
+              vars:
+                  GOOS: darwin
+                  GOARCH: arm64
+            - cp dist/bin/wsh-{{.VERSION}}-darwin.arm64 ~/Library/Application\ Support/waveterm-dev/bin/wsh
+
+    dev:clearconfig:
+        desc: Clear the config directory for waveterm-dev
+        cmd: "{{.RMRF}} ~/.config/waveterm-dev"
+
+    dev:cleardata:
+        desc: Clear the data directory for waveterm-dev
+        cmds:
+            - task: dev:cleardata:windows
+            - task: dev:cleardata:linux
+            - task: dev:cleardata:macos
+
+    init:
+        desc: Initialize the project for development.
+        cmds:
+            - yarn
+            - go mod tidy
+            - cd docs && yarn
+
+    dev:cleardata:windows:
+        internal: true
+        platforms: [windows]
+        cmd: '{{.RMRF}} %LOCALAPPDATA%\waveterm-dev\Data'
+
+    dev:cleardata:linux:
+        internal: true
+        platforms: [linux]
+        cmd: "rm -rf ~/.local/share/waveterm-dev"
+
+    dev:cleardata:macos:
+        internal: true
+        platforms: [darwin]
+        cmd: 'rm -rf ~/Library/Application\ Support/waveterm-dev'
 
     yarn:
         desc: Runs `yarn`
@@ -251,3 +389,8 @@ tasks:
         sources:
             - go.mod
         cmd: go mod tidy
+
+    copyfiles:*:*:
+        desc: Recursively copy directory and its contents.
+        internal: true
+        cmd: '{{if eq OS "windows"}}powershell Copy-Item -Recurse -Force -Path {{index .MATCH 0}} -Destination {{index .MATCH 1}}{{else}}mkdir -p "$(dirname {{index .MATCH 1}})" && cp -r {{index .MATCH 0}} {{index .MATCH 1}}{{end}}'

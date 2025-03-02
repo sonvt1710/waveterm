@@ -1,11 +1,11 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { ipcMain } from "electron";
 import { getWebServerEndpoint, getWSServerEndpoint } from "../frontend/util/endpoints";
 
 const AuthKeyHeader = "X-AuthKey";
-export const AuthKeyEnv = "AUTH_KEY";
+export const WaveAuthKeyEnv = "WAVETERM_AUTH_KEY";
 export const AuthKey = crypto.randomUUID();
 
 ipcMain.on("get-auth-key", (event) => {

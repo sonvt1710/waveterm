@@ -1,9 +1,10 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package cmd
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,31 +21,38 @@ var editMagnified bool
 var editorCmd = &cobra.Command{
 	Use:     "editor",
 	Short:   "edit a file (blocks until editor is closed)",
-	Args:    cobra.ExactArgs(1),
-	Run:     editorRun,
+	RunE:    editorRun,
 	PreRunE: preRunSetupRpcClient,
 }
 
 func init() {
-	editCmd.Flags().BoolVarP(&editMagnified, "magnified", "m", false, "open view in magnified mode")
+	editorCmd.Flags().BoolVarP(&editMagnified, "magnified", "m", false, "open view in magnified mode")
 	rootCmd.AddCommand(editorCmd)
 }
 
-func editorRun(cmd *cobra.Command, args []string) {
+func editorRun(cmd *cobra.Command, args []string) (rtnErr error) {
+	defer func() {
+		sendActivity("editor", rtnErr == nil)
+	}()
+	if len(args) == 0 {
+		OutputHelpMessage(cmd)
+		return fmt.Errorf("no arguments.  wsh editor requires a file or URL as an argument argument")
+	}
+	if len(args) > 1 {
+		OutputHelpMessage(cmd)
+		return fmt.Errorf("too many arguments.  wsh editor requires exactly one argument")
+	}
 	fileArg := args[0]
 	absFile, err := filepath.Abs(fileArg)
 	if err != nil {
-		WriteStderr("[error] getting absolute path: %v\n", err)
-		return
+		return fmt.Errorf("getting absolute path: %w", err)
 	}
 	_, err = os.Stat(absFile)
 	if err == fs.ErrNotExist {
-		WriteStderr("[error] file does not exist: %q\n", absFile)
-		return
+		return fmt.Errorf("file does not exist: %q", absFile)
 	}
 	if err != nil {
-		WriteStderr("[error] getting file info: %v\n", err)
-		return
+		return fmt.Errorf("getting file info: %w", err)
 	}
 	wshCmd := wshrpc.CommandCreateBlockData{
 		BlockDef: &waveobj.BlockDef{
@@ -61,15 +69,15 @@ func editorRun(cmd *cobra.Command, args []string) {
 	}
 	blockRef, err := wshclient.CreateBlockCommand(RpcClient, wshCmd, &wshrpc.RpcOpts{Timeout: 2000})
 	if err != nil {
-		WriteStderr("[error] running view command: %v\r\n", err)
-		return
+		return fmt.Errorf("running view command: %w", err)
 	}
 	doneCh := make(chan bool)
-	RpcClient.EventListener.On("blockclose", func(event *wps.WaveEvent) {
+	RpcClient.EventListener.On(wps.Event_BlockClose, func(event *wps.WaveEvent) {
 		if event.HasScope(blockRef.String()) {
 			close(doneCh)
 		}
 	})
-	wshclient.EventSubCommand(RpcClient, wps.SubscriptionRequest{Event: "blockclose", Scopes: []string{blockRef.String()}}, nil)
+	wshclient.EventSubCommand(RpcClient, wps.SubscriptionRequest{Event: wps.Event_BlockClose, Scopes: []string{blockRef.String()}}, nil)
 	<-doneCh
+	return nil
 }

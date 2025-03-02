@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { getConnStatusAtom, globalStore, WOS } from "@/store/global";
@@ -13,10 +13,10 @@ import * as React from "react";
 import { useDimensionsWithExistingRef } from "@/app/hook/useDimensions";
 import { waveEventSubscribe } from "@/app/store/wps";
 import { RpcApi } from "@/app/store/wshclientapi";
-import { WindowRpcClient } from "@/app/store/wshrpcutil";
+import { TabRpcClient } from "@/app/store/wshrpcutil";
 import { atoms } from "@/store/global";
 import { OverlayScrollbarsComponent, OverlayScrollbarsComponentRef } from "overlayscrollbars-react";
-import "./sysinfo.less";
+import "./sysinfo.scss";
 
 const DefaultNumPoints = 120;
 
@@ -91,7 +91,7 @@ function convertWaveEventToDataItem(event: WaveEvent): DataItem {
     return dataItem;
 }
 
-class SysinfoViewModel {
+class SysinfoViewModel implements ViewModel {
     viewType: string;
     blockAtom: jotai.Atom<Block>;
     termMode: jotai.Atom<string>;
@@ -101,13 +101,15 @@ class SysinfoViewModel {
     viewText: jotai.Atom<string>;
     viewName: jotai.Atom<string>;
     dataAtom: jotai.PrimitiveAtom<Array<DataItem>>;
-    addDataAtom: jotai.WritableAtom<unknown, [DataItem[]], void>;
+    addInitialDataAtom: jotai.WritableAtom<unknown, [DataItem[]], void>;
+    addContinuousDataAtom: jotai.WritableAtom<unknown, [DataItem], void>;
     incrementCount: jotai.WritableAtom<unknown, [], Promise<void>>;
     loadingAtom: jotai.PrimitiveAtom<boolean>;
     numPoints: jotai.Atom<number>;
     metrics: jotai.Atom<string[]>;
     connection: jotai.Atom<string>;
     manageConnection: jotai.Atom<boolean>;
+    filterOutNowsh: jotai.Atom<boolean>;
     connStatus: jotai.Atom<ConnStatus>;
     plotMetaAtom: jotai.PrimitiveAtom<Map<string, TimeSeriesMeta>>;
     endIconButtons: jotai.Atom<IconButtonDecl[]>;
@@ -117,18 +119,57 @@ class SysinfoViewModel {
         this.viewType = viewType;
         this.blockId = blockId;
         this.blockAtom = WOS.getWaveObjectAtom<Block>(`block:${blockId}`);
-        this.addDataAtom = jotai.atom(null, (get, set, points) => {
+        this.addInitialDataAtom = jotai.atom(null, (get, set, points) => {
+            const targetLen = get(this.numPoints) + 1;
+            try {
+                const newDataRaw = [...points];
+                if (newDataRaw.length == 0) {
+                    return;
+                }
+                const latestItemTs = newDataRaw[newDataRaw.length - 1]?.ts ?? 0;
+                const cutoffTs = latestItemTs - 1000 * targetLen;
+                const blankItemTemplate = { ...newDataRaw[newDataRaw.length - 1] };
+                for (const key in blankItemTemplate) {
+                    blankItemTemplate[key] = NaN;
+                }
+
+                const newDataFiltered = newDataRaw.filter((dataItem) => dataItem.ts >= cutoffTs);
+                if (newDataFiltered.length == 0) {
+                    return;
+                }
+                const newDataWithGaps: Array<DataItem> = [];
+                if (newDataFiltered[0].ts > cutoffTs) {
+                    const blankItemStart = { ...blankItemTemplate, ts: cutoffTs };
+                    const blankItemEnd = { ...blankItemTemplate, ts: newDataFiltered[0].ts - 1 };
+                    newDataWithGaps.push(blankItemStart);
+                    newDataWithGaps.push(blankItemEnd);
+                }
+                newDataWithGaps.push(newDataFiltered[0]);
+                for (let i = 1; i < newDataFiltered.length; i++) {
+                    const prevIdxItem = newDataFiltered[i - 1];
+                    const curIdxItem = newDataFiltered[i];
+                    const timeDiff = curIdxItem.ts - prevIdxItem.ts;
+                    if (timeDiff > 2000) {
+                        const blankItemStart = { ...blankItemTemplate, ts: prevIdxItem.ts + 1, blank: 1 };
+                        const blankItemEnd = { ...blankItemTemplate, ts: curIdxItem.ts - 1, blank: 1 };
+                        newDataWithGaps.push(blankItemStart);
+                        newDataWithGaps.push(blankItemEnd);
+                    }
+                    newDataWithGaps.push(curIdxItem);
+                }
+                set(this.dataAtom, newDataWithGaps);
+            } catch (e) {
+                console.log("Error adding data to sysinfo", e);
+            }
+        });
+        this.addContinuousDataAtom = jotai.atom(null, (get, set, newPoint) => {
             const targetLen = get(this.numPoints) + 1;
             let data = get(this.dataAtom);
             try {
-                if (data.length > targetLen) {
-                    data = data.slice(data.length - targetLen);
-                }
-                if (data.length < targetLen) {
-                    const defaultData = this.getDefaultData();
-                    data = [...defaultData.slice(defaultData.length - targetLen + data.length), ...data];
-                }
-                const newData = [...data.slice(points.length), ...points];
+                const latestItemTs = newPoint?.ts ?? 0;
+                const cutoffTs = latestItemTs - 1000 * targetLen;
+                data.push(newPoint);
+                const newData = data.filter((dataItem) => dataItem.ts >= cutoffTs);
                 set(this.dataAtom, newData);
             } catch (e) {
                 console.log("Error adding data to sysinfo", e);
@@ -136,6 +177,7 @@ class SysinfoViewModel {
         });
         this.plotMetaAtom = jotai.atom(new Map(Object.entries(DefaultPlotMeta)));
         this.manageConnection = jotai.atom(true);
+        this.filterOutNowsh = jotai.atom(true);
         this.loadingAtom = jotai.atom(true);
         this.numPoints = jotai.atom((get) => {
             const blockData = get(this.blockAtom);
@@ -175,7 +217,7 @@ class SysinfoViewModel {
         this.incrementCount = jotai.atom(null, async (get, set) => {
             const meta = get(this.blockAtom).meta;
             const count = meta.count ?? 0;
-            await RpcApi.SetMetaCommand(WindowRpcClient, {
+            await RpcApi.SetMetaCommand(TabRpcClient, {
                 oref: WOS.makeORef("block", this.blockId),
                 meta: { count: count + 1 },
             });
@@ -188,7 +230,7 @@ class SysinfoViewModel {
             }
             return connValue;
         });
-        this.dataAtom = jotai.atom(this.getDefaultData());
+        this.dataAtom = jotai.atom([]);
         this.loadInitialData();
         this.connStatus = jotai.atom((get) => {
             const blockData = get(this.blockAtom);
@@ -198,12 +240,16 @@ class SysinfoViewModel {
         });
     }
 
+    get viewComponent(): ViewComponent {
+        return SysinfoView;
+    }
+
     async loadInitialData() {
         globalStore.set(this.loadingAtom, true);
         try {
             const numPoints = globalStore.get(this.numPoints);
             const connName = globalStore.get(this.connection);
-            const initialData = await RpcApi.EventReadHistoryCommand(WindowRpcClient, {
+            const initialData = await RpcApi.EventReadHistoryCommand(TabRpcClient, {
                 event: "sysinfo",
                 scope: connName,
                 maxitems: numPoints,
@@ -214,8 +260,8 @@ class SysinfoViewModel {
             const newData = this.getDefaultData();
             const initialDataItems: DataItem[] = initialData.map(convertWaveEventToDataItem);
             // splice the initial data into the default data (replacing the newest points)
-            newData.splice(newData.length - initialDataItems.length, initialDataItems.length, ...initialDataItems);
-            globalStore.set(this.addDataAtom, newData);
+            //newData.splice(newData.length - initialDataItems.length, initialDataItems.length, ...initialDataItems);
+            globalStore.set(this.addInitialDataAtom, initialDataItems);
         } catch (e) {
             console.log("Error loading initial data for sysinfo", e);
         } finally {
@@ -230,7 +276,7 @@ class SysinfoViewModel {
         const plotData = globalStore.get(this.dataAtom);
 
         termThemeKeys.sort((a, b) => {
-            return termThemes[a]["display:order"] - termThemes[b]["display:order"];
+            return (termThemes[a]["display:order"] ?? 0) - (termThemes[b]["display:order"] ?? 0);
         });
         const fullMenu: ContextMenuItem[] = [];
         let submenu: ContextMenuItem[];
@@ -245,7 +291,7 @@ class SysinfoViewModel {
                     type: "radio",
                     checked: currentlySelected == plotType,
                     click: async () => {
-                        await RpcApi.SetMetaCommand(WindowRpcClient, {
+                        await RpcApi.SetMetaCommand(TabRpcClient, {
                             oref: WOS.makeORef("block", this.blockId),
                             meta: { "graph:metrics": dataTypes, "sysinfo:type": plotType },
                         });
@@ -275,11 +321,6 @@ class SysinfoViewModel {
     }
 }
 
-function makeSysinfoViewModel(blockId: string, viewType: string): SysinfoViewModel {
-    const sysinfoViewModel = new SysinfoViewModel(blockId, viewType);
-    return sysinfoViewModel;
-}
-
 const plotColors = ["#58C142", "#FFC107", "#FF5722", "#2196F3", "#9C27B0", "#00BCD4", "#FFEB3B", "#795548"];
 
 type SysinfoViewProps = {
@@ -301,7 +342,7 @@ function SysinfoView({ model, blockId }: SysinfoViewProps) {
     const connName = jotai.useAtomValue(model.connection);
     const lastConnName = React.useRef(connName);
     const connStatus = jotai.useAtomValue(model.connStatus);
-    const addPlotData = jotai.useSetAtom(model.addDataAtom);
+    const addContinuousData = jotai.useSetAtom(model.addContinuousDataAtom);
     const loading = jotai.useAtomValue(model.loadingAtom);
 
     React.useEffect(() => {
@@ -323,14 +364,20 @@ function SysinfoView({ model, blockId }: SysinfoViewProps) {
                     return;
                 }
                 const dataItem = convertWaveEventToDataItem(event);
-                addPlotData([dataItem]);
+                const prevData = globalStore.get(model.dataAtom);
+                const prevLastTs = prevData[prevData.length - 1]?.ts ?? 0;
+                if (dataItem.ts - prevLastTs > 2000) {
+                    model.loadInitialData();
+                } else {
+                    addContinuousData(dataItem);
+                }
             },
         });
         console.log("subscribe to sysinfo", connName);
         return () => {
             unsubFn();
         };
-    }, [connName]);
+    }, [connName, addContinuousData]);
     if (connStatus?.status != "connected") {
         return null;
     }
@@ -348,6 +395,7 @@ type SingleLinePlotProps = {
     defaultColor: string;
     title?: boolean;
     sparkline?: boolean;
+    targetLen: number;
 };
 
 function SingleLinePlot({
@@ -358,6 +406,7 @@ function SingleLinePlot({
     defaultColor,
     title = false,
     sparkline = false,
+    targetLen,
 }: SingleLinePlotProps) {
     const containerRef = React.useRef<HTMLInputElement>();
     const domRect = useDimensionsWithExistingRef(containerRef, 300);
@@ -397,7 +446,7 @@ function SingleLinePlot({
     );
     if (title) {
         marks.push(
-            Plot.text([yvalMeta.name], {
+            Plot.text([yvalMeta?.name], {
                 frameAnchor: "top-left",
                 dx: 4,
                 fill: "var(--grey-text-color)",
@@ -440,12 +489,15 @@ function SingleLinePlot({
     );
     let maxY = resolveDomainBound(yvalMeta?.maxy, plotData[plotData.length - 1]) ?? 100;
     let minY = resolveDomainBound(yvalMeta?.miny, plotData[plotData.length - 1]) ?? 0;
+    let maxX = plotData[plotData.length - 1].ts;
+    let minX = maxX - targetLen * 1000;
     const plot = Plot.plot({
         axis: !sparkline,
         x: {
             grid: true,
             label: "time",
             tickFormat: (d) => `${dayjs.unix(d / 1000).format("HH:mm:ss")}`,
+            domain: [minX, maxX],
         },
         y: { label: labelY, domain: [minY, maxY] },
         width: plotWidth,
@@ -469,6 +521,7 @@ const SysinfoViewInner = React.memo(({ model }: SysinfoViewProps) => {
     const yvals = jotai.useAtomValue(model.metrics);
     const plotMeta = jotai.useAtomValue(model.plotMetaAtom);
     const osRef = React.useRef<OverlayScrollbarsComponentRef>();
+    const targetLen = jotai.useAtomValue(model.numPoints) + 1;
     let title = false;
     let cols2 = false;
     if (yvals.length > 1) {
@@ -479,8 +532,12 @@ const SysinfoViewInner = React.memo(({ model }: SysinfoViewProps) => {
     }
 
     return (
-        <OverlayScrollbarsComponent ref={osRef} className="scrollable" options={{ scrollbars: { autoHide: "leave" } }}>
-            <div className={clsx("sysinfo-view", { "two-columns": cols2 })}>
+        <OverlayScrollbarsComponent
+            ref={osRef}
+            className="sysinfo-view"
+            options={{ scrollbars: { autoHide: "leave" } }}
+        >
+            <div className={clsx("sysinfo-inner", { "two-columns": cols2 })}>
                 {yvals.map((yval, idx) => {
                     return (
                         <SingleLinePlot
@@ -491,6 +548,7 @@ const SysinfoViewInner = React.memo(({ model }: SysinfoViewProps) => {
                             blockId={model.blockId}
                             defaultColor={"var(--accent-color)"}
                             title={title}
+                            targetLen={targetLen}
                         />
                     );
                 })}
@@ -499,4 +557,4 @@ const SysinfoViewInner = React.memo(({ model }: SysinfoViewProps) => {
     );
 });
 
-export { makeSysinfoViewModel, SysinfoView, SysinfoViewModel };
+export { SysinfoViewModel };

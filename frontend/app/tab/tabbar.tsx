@@ -1,23 +1,26 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { Button } from "@/app/element/button";
 import { modalsModel } from "@/app/store/modalmodel";
 import { WindowDrag } from "@/element/windowdrag";
 import { deleteLayoutModelForTab } from "@/layout/index";
-import { atoms, getApi, isDev, PLATFORM } from "@/store/global";
-import * as services from "@/store/services";
+import { atoms, createTab, getApi, globalStore, isDev, setActiveTab } from "@/store/global";
+import { PLATFORM, PlatformMacOS } from "@/util/platformutil";
+import { fireAndForget } from "@/util/util";
 import { useAtomValue } from "jotai";
 import { OverlayScrollbars } from "overlayscrollbars";
-import React, { createRef, useCallback, useEffect, useRef, useState } from "react";
+import { createRef, memo, useCallback, useEffect, useRef, useState } from "react";
 import { debounce } from "throttle-debounce";
+import { IconButton } from "../element/iconbutton";
+import { WorkspaceService } from "../store/services";
 import { Tab } from "./tab";
-import "./tabbar.less";
+import "./tabbar.scss";
 import { UpdateStatusBanner } from "./updatebanner";
+import { WorkspaceSwitcher } from "./workspaceswitcher";
 
 const TAB_DEFAULT_WIDTH = 130;
 const TAB_MIN_WIDTH = 100;
-const DRAGGER_RIGHT_MIN_WIDTH = 74;
 const OS_OPTIONS = {
     overflow: {
         x: "scroll",
@@ -95,49 +98,80 @@ const ConfigErrorIcon = ({ buttonRef }: { buttonRef: React.RefObject<HTMLElement
             Config Error
         </Button>
     );
-    return (
-        <div className="config-error" ref={buttonRef as React.RefObject<HTMLDivElement>}>
-            <i className="fa fa-solid fa-exclamation-triangle" />
-        </div>
-    );
 };
 
-const TabBar = React.memo(({ workspace }: TabBarProps) => {
+function strArrayIsEqual(a: string[], b: string[]) {
+    // null check
+    if (a == null && b == null) {
+        return true;
+    }
+    if (a == null || b == null) {
+        return false;
+    }
+    if (a.length !== b.length) {
+        return false;
+    }
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function setIsEqual(a: Set<string> | null, b: Set<string> | null): boolean {
+    if (a == null && b == null) {
+        return true;
+    }
+    if (a == null || b == null) {
+        return false;
+    }
+    if (a.size !== b.size) {
+        return false;
+    }
+    for (const item of a) {
+        if (!b.has(item)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const TabBar = memo(({ workspace }: TabBarProps) => {
     const [tabIds, setTabIds] = useState<string[]>([]);
+    const [pinnedTabIds, setPinnedTabIds] = useState<Set<string>>(new Set());
     const [dragStartPositions, setDragStartPositions] = useState<number[]>([]);
     const [draggingTab, setDraggingTab] = useState<string>();
     const [tabsLoaded, setTabsLoaded] = useState({});
-    // const [scrollable, setScrollable] = useState(false);
-    // const [tabWidth, setTabWidth] = useState(TAB_DEFAULT_WIDTH);
     const [newTabId, setNewTabId] = useState<string | null>(null);
 
     const tabbarWrapperRef = useRef<HTMLDivElement>(null);
     const tabBarRef = useRef<HTMLDivElement>(null);
     const tabsWrapperRef = useRef<HTMLDivElement>(null);
     const tabRefs = useRef<React.RefObject<HTMLDivElement>[]>([]);
-    const addBtnRef = useRef<HTMLDivElement>(null);
+    const addBtnRef = useRef<HTMLButtonElement>(null);
     const draggingRemovedRef = useRef(false);
     const draggingTabDataRef = useRef({
         tabId: "",
         ref: { current: null },
         tabStartX: 0,
+        tabStartIndex: 0,
         tabIndex: 0,
         initialOffsetX: null,
         totalScrollOffset: null,
         dragged: false,
     });
     const osInstanceRef = useRef<OverlayScrollbars>(null);
-    const draggerRightRef = useRef<HTMLDivElement>(null);
     const draggerLeftRef = useRef<HTMLDivElement>(null);
+    const workspaceSwitcherRef = useRef<HTMLDivElement>(null);
+    const devLabelRef = useRef<HTMLDivElement>(null);
+    const appMenuButtonRef = useRef<HTMLDivElement>(null);
     const tabWidthRef = useRef<number>(TAB_DEFAULT_WIDTH);
     const scrollableRef = useRef<boolean>(false);
-    const updateStatusButtonRef = useRef<HTMLButtonElement>(null);
+    const updateStatusBannerRef = useRef<HTMLButtonElement>(null);
     const configErrorButtonRef = useRef<HTMLElement>(null);
     const prevAllLoadedRef = useRef<boolean>(false);
-
-    const windowData = useAtomValue(atoms.waveWindow);
-    const { activetabid } = windowData;
-
+    const activeTabId = useAtomValue(atoms.staticTabId);
     const isFullScreen = useAtomValue(atoms.isFullScreen);
 
     const settings = useAtomValue(atoms.settingsAtom);
@@ -151,19 +185,24 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
     }, [tabIds]);
 
     useEffect(() => {
-        if (workspace) {
-            // Compare current tabIds with new workspace.tabids
-            const currentTabIds = new Set(tabIds);
-            const newTabIds = new Set(workspace.tabids);
-
-            const areEqual =
-                currentTabIds.size === newTabIds.size && [...currentTabIds].every((id) => newTabIds.has(id));
-
-            if (!areEqual) {
-                setTabIds(workspace.tabids);
-            }
+        if (!workspace) {
+            return;
         }
-    }, [workspace, tabIds]);
+        // Compare current tabIds with new workspace.tabids
+        console.log("tabbar workspace", workspace);
+
+        const newTabIdsArr = [...(workspace.pinnedtabids ?? []), ...(workspace.tabids ?? [])];
+        const newPinnedTabSet = new Set(workspace.pinnedtabids ?? []);
+
+        const areEqual = strArrayIsEqual(tabIds, newTabIdsArr) && setIsEqual(pinnedTabIds, newPinnedTabSet);
+
+        if (!areEqual) {
+            console.log("newPinnedTabIds", newPinnedTabSet);
+            console.log("newTabIdList", newTabIdsArr);
+            setTabIds(newTabIdsArr);
+            setPinnedTabIds(newPinnedTabSet);
+        }
+    }, [workspace, tabIds, pinnedTabIds]);
 
     const saveTabsPosition = useCallback(() => {
         const tabs = tabRefs.current;
@@ -189,35 +228,32 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
         const tabbarWrapperWidth = tabbarWrapperRef.current.getBoundingClientRect().width;
         const windowDragLeftWidth = draggerLeftRef.current.getBoundingClientRect().width;
         const addBtnWidth = addBtnRef.current.getBoundingClientRect().width;
-        const updateStatusLabelWidth = updateStatusButtonRef.current?.getBoundingClientRect().width ?? 0;
+        const updateStatusLabelWidth = updateStatusBannerRef.current?.getBoundingClientRect().width ?? 0;
         const configErrorWidth = configErrorButtonRef.current?.getBoundingClientRect().width ?? 0;
-        const spaceForTabs =
-            tabbarWrapperWidth -
-            (windowDragLeftWidth + DRAGGER_RIGHT_MIN_WIDTH + addBtnWidth + updateStatusLabelWidth + configErrorWidth);
+        const appMenuButtonWidth = appMenuButtonRef.current?.getBoundingClientRect().width ?? 0;
+        const workspaceSwitcherWidth = workspaceSwitcherRef.current?.getBoundingClientRect().width ?? 0;
+        const devLabelWidth = devLabelRef.current?.getBoundingClientRect().width ?? 0;
+
+        const nonTabElementsWidth =
+            windowDragLeftWidth +
+            addBtnWidth +
+            updateStatusLabelWidth +
+            configErrorWidth +
+            appMenuButtonWidth +
+            workspaceSwitcherWidth +
+            devLabelWidth;
+        const spaceForTabs = tabbarWrapperWidth - nonTabElementsWidth;
 
         const numberOfTabs = tabIds.length;
-        const totalDefaultTabWidth = numberOfTabs * TAB_DEFAULT_WIDTH;
-        const minTotalTabWidth = numberOfTabs * TAB_MIN_WIDTH;
-        const tabWidth = tabWidthRef.current;
-        const scrollable = scrollableRef.current;
-        let newTabWidth = tabWidth;
-        let newScrollable = scrollable;
 
-        if (spaceForTabs < totalDefaultTabWidth && spaceForTabs > minTotalTabWidth) {
-            newTabWidth = TAB_MIN_WIDTH;
-        } else if (minTotalTabWidth > spaceForTabs) {
-            // Case where tabs cannot shrink further, make the tab bar scrollable
-            newTabWidth = TAB_MIN_WIDTH;
-            newScrollable = true;
-        } else if (totalDefaultTabWidth > spaceForTabs) {
-            // Case where resizing is needed due to limited container width
-            newTabWidth = spaceForTabs / numberOfTabs;
-            newScrollable = false;
-        } else {
-            // Case where tabs were previously shrunk or there is enough space for default width tabs
-            newTabWidth = TAB_DEFAULT_WIDTH;
-            newScrollable = false;
-        }
+        // Compute the ideal width per tab by dividing the available space by the number of tabs
+        let idealTabWidth = spaceForTabs / numberOfTabs;
+
+        // Apply min/max constraints
+        idealTabWidth = Math.max(TAB_MIN_WIDTH, Math.min(idealTabWidth, TAB_DEFAULT_WIDTH));
+
+        // Determine if the tab bar needs to be scrollable
+        const newScrollable = idealTabWidth * numberOfTabs > spaceForTabs;
 
         // Apply the calculated width and position to all tabs
         tabRefs.current.forEach((ref, index) => {
@@ -227,20 +263,22 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
                 } else {
                     ref.current.classList.remove("animate");
                 }
-                ref.current.style.width = `${newTabWidth}px`;
-                ref.current.style.transform = `translate3d(${index * newTabWidth}px,0,0)`;
+                ref.current.style.width = `${idealTabWidth}px`;
+                ref.current.style.transform = `translate3d(${index * idealTabWidth}px,0,0)`;
                 ref.current.style.opacity = "1";
             }
         });
 
         // Update the state with the new tab width if it has changed
-        if (newTabWidth !== tabWidth) {
-            tabWidthRef.current = newTabWidth;
+        if (idealTabWidth !== tabWidthRef.current) {
+            tabWidthRef.current = idealTabWidth;
         }
+
         // Update the state with the new scrollable state if it has changed
-        if (newScrollable !== scrollable) {
+        if (newScrollable !== scrollableRef.current) {
             scrollableRef.current = newScrollable;
         }
+
         // Initialize/destroy overlay scrollbars
         if (newScrollable) {
             osInstanceRef.current = OverlayScrollbars(tabBarRef.current, { ...(OS_OPTIONS as any) });
@@ -251,10 +289,22 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
         }
     };
 
+    const saveTabsPositionDebounced = useCallback(
+        debounce(100, () => saveTabsPosition()),
+        [saveTabsPosition]
+    );
+
     const handleResizeTabs = useCallback(() => {
         setSizeAndPosition();
-        debounce(100, () => saveTabsPosition())();
+        saveTabsPositionDebounced();
     }, [tabIds, newTabId, isFullScreen]);
+
+    const reinitVersion = useAtomValue(atoms.reinitVersion);
+    useEffect(() => {
+        if (reinitVersion > 0) {
+            setSizeAndPosition();
+        }
+    }, [reinitVersion]);
 
     useEffect(() => {
         window.addEventListener("resize", () => handleResizeTabs());
@@ -276,7 +326,7 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
     }, [tabIds, tabsLoaded, newTabId, saveTabsPosition]);
 
     const getDragDirection = (currentX: number) => {
-        let dragDirection;
+        let dragDirection: string;
         if (currentX - prevDelta > 0) {
             dragDirection = "+";
         } else if (currentX - prevDelta === 0) {
@@ -416,6 +466,51 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
         }
     };
 
+    //            } else if ((tabIndex > pinnedTabCount || (tabIndex === 1 && pinnedTabCount === 1)) && isPinned) {
+
+    const setUpdatedTabsDebounced = useCallback(
+        debounce(300, (tabIndex: number, tabIds: string[], pinnedTabIds: Set<string>) => {
+            console.log(
+                "setting updated tabs",
+                tabIds,
+                pinnedTabIds,
+                tabIndex,
+                draggingTabDataRef.current.tabStartIndex
+            );
+            // Reset styles
+            tabRefs.current.forEach((ref) => {
+                ref.current.style.zIndex = "0";
+                ref.current.classList.remove("animate");
+            });
+            let pinnedTabCount = pinnedTabIds.size;
+            const draggedTabId = draggingTabDataRef.current.tabId;
+            const isPinned = pinnedTabIds.has(draggedTabId);
+            const nextTabId = tabIds[tabIndex + 1];
+            const prevTabId = tabIds[tabIndex - 1];
+            if (!isPinned && nextTabId && pinnedTabIds.has(nextTabId)) {
+                pinnedTabIds.add(draggedTabId);
+            } else if (isPinned && prevTabId && !pinnedTabIds.has(prevTabId)) {
+                pinnedTabIds.delete(draggedTabId);
+            }
+            if (pinnedTabCount != pinnedTabIds.size) {
+                console.log("updated pinnedTabIds", pinnedTabIds, tabIds);
+                setPinnedTabIds(pinnedTabIds);
+                pinnedTabCount = pinnedTabIds.size;
+            }
+            // Reset dragging state
+            setDraggingTab(null);
+            // Update workspace tab ids
+            fireAndForget(() =>
+                WorkspaceService.UpdateTabIds(
+                    workspace.oid,
+                    tabIds.slice(pinnedTabCount),
+                    tabIds.slice(0, pinnedTabCount)
+                )
+            );
+        }),
+        []
+    );
+
     const handleMouseUp = (event: MouseEvent) => {
         const { tabIndex, dragged } = draggingTabDataRef.current;
 
@@ -430,17 +525,7 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
         }
 
         if (dragged) {
-            debounce(300, () => {
-                // Reset styles
-                tabRefs.current.forEach((ref) => {
-                    ref.current.style.zIndex = "0";
-                    ref.current.classList.remove("animate");
-                });
-                // Reset dragging state
-                setDraggingTab(null);
-                // Update workspace tab ids
-                services.ObjectService.UpdateWorkspaceTabIds(workspace.oid, tabIds);
-            })();
+            setUpdatedTabsDebounced(tabIndex, tabIds, pinnedTabIds);
         } else {
             // Reset styles
             tabRefs.current.forEach((ref) => {
@@ -463,12 +548,14 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
             const tabIndex = tabIds.indexOf(tabId);
             const tabStartX = dragStartPositions[tabIndex]; // Starting X position of the tab
 
+            console.log("handleDragStart", tabId, tabIndex, tabStartX);
             if (ref.current) {
                 draggingTabDataRef.current = {
                     tabId: ref.current.dataset.tabId,
                     ref,
                     tabStartX,
                     tabIndex,
+                    tabStartIndex: tabIndex,
                     initialOffsetX: null,
                     totalScrollOffset: 0,
                     dragged: false,
@@ -483,38 +570,54 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
 
     const handleSelectTab = (tabId: string) => {
         if (!draggingTabDataRef.current.dragged) {
-            services.ObjectService.SetActiveTab(tabId);
+            setActiveTab(tabId);
         }
     };
 
-    const handleAddTab = () => {
-        const newTabName = `T${tabIds.length + 1}`;
-        services.ObjectService.AddTabToWorkspace(newTabName, true).then((tabId) => {
-            setTabIds([...tabIds, tabId]);
-            setNewTabId(tabId);
-        });
-        services.ObjectService.GetObject;
-        tabsWrapperRef.current.style.transition;
-        tabsWrapperRef.current.style.setProperty("--tabs-wrapper-transition", "width 0.1s ease");
-
+    const updateScrollDebounced = useCallback(
         debounce(30, () => {
             if (scrollableRef.current) {
                 const { viewport } = osInstanceRef.current.elements();
                 viewport.scrollLeft = tabIds.length * tabWidthRef.current;
             }
-        })();
+        }),
+        [tabIds]
+    );
 
-        debounce(100, () => setNewTabId(null))();
+    const setNewTabIdDebounced = useCallback(
+        debounce(100, (tabId: string) => {
+            setNewTabId(tabId);
+        }),
+        []
+    );
+
+    const handleAddTab = () => {
+        createTab();
+        tabsWrapperRef.current.style.transition;
+        tabsWrapperRef.current.style.setProperty("--tabs-wrapper-transition", "width 0.1s ease");
+
+        updateScrollDebounced();
+
+        setNewTabIdDebounced(null);
     };
 
     const handleCloseTab = (event: React.MouseEvent<HTMLButtonElement, MouseEvent> | null, tabId: string) => {
         event?.stopPropagation();
-        services.WindowService.CloseTab(tabId);
+        const ws = globalStore.get(atoms.workspace);
+        getApi().closeTab(ws.oid, tabId);
         tabsWrapperRef.current.style.setProperty("--tabs-wrapper-transition", "width 0.3s ease");
         deleteLayoutModelForTab(tabId);
     };
 
-    const handleTabLoaded = useCallback((tabId) => {
+    const handlePinChange = useCallback(
+        (tabId: string, pinned: boolean) => {
+            console.log("handlePinChange", tabId, pinned);
+            fireAndForget(() => WorkspaceService.ChangeTabPinning(workspace.oid, tabId, pinned));
+        },
+        [workspace]
+    );
+
+    const handleTabLoaded = useCallback((tabId: string) => {
         setTabsLoaded((prev) => {
             if (!prev[tabId]) {
                 // Only update if the tab isn't already marked as loaded
@@ -525,45 +628,55 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
     }, []);
 
     const isBeforeActive = (tabId: string) => {
-        return tabIds.indexOf(tabId) === tabIds.indexOf(activetabid) - 1;
+        return tabIds.indexOf(tabId) === tabIds.indexOf(activeTabId) - 1;
     };
 
     function onEllipsisClick() {
-        getApi().showContextMenu();
+        getApi().showContextMenu(workspace.oid);
     }
 
     const tabsWrapperWidth = tabIds.length * tabWidthRef.current;
     const devLabel = isDev() ? (
-        <div className="dev-label">
+        <div ref={devLabelRef} className="dev-label">
             <i className="fa fa-brands fa-dev fa-fw" />
         </div>
     ) : undefined;
     const appMenuButton =
-        PLATFORM !== "darwin" && !settings["window:showmenubar"] ? (
-            <div className="app-menu-button" onClick={onEllipsisClick}>
+        PLATFORM !== PlatformMacOS && !settings["window:showmenubar"] ? (
+            <div ref={appMenuButtonRef} className="app-menu-button" onClick={onEllipsisClick}>
                 <i className="fa fa-ellipsis" />
             </div>
         ) : undefined;
 
+    const addtabButtonDecl: IconButtonDecl = {
+        elemtype: "iconbutton",
+        icon: "plus",
+        click: handleAddTab,
+        title: "Add Tab",
+    };
     return (
         <div ref={tabbarWrapperRef} className="tab-bar-wrapper">
             <WindowDrag ref={draggerLeftRef} className="left" />
             {appMenuButton}
             {devLabel}
+            <WorkspaceSwitcher ref={workspaceSwitcherRef} />
             <div className="tab-bar" ref={tabBarRef} data-overlayscrollbars-initialize>
                 <div className="tabs-wrapper" ref={tabsWrapperRef} style={{ width: `${tabsWrapperWidth}px` }}>
                     {tabIds.map((tabId, index) => {
+                        const isPinned = pinnedTabIds.has(tabId);
                         return (
                             <Tab
                                 key={tabId}
                                 ref={tabRefs.current[index]}
                                 id={tabId}
                                 isFirst={index === 0}
+                                isPinned={isPinned}
                                 onSelect={() => handleSelectTab(tabId)}
-                                active={activetabid === tabId}
+                                active={activeTabId === tabId}
                                 onDragStart={(event) => handleDragStart(event, tabId, tabRefs.current[index])}
                                 onClose={(event) => handleCloseTab(event, tabId)}
                                 onLoaded={() => handleTabLoaded(tabId)}
+                                onPinChange={() => handlePinChange(tabId, !isPinned)}
                                 isBeforeActive={isBeforeActive(tabId)}
                                 isDragging={draggingTab === tabId}
                                 tabWidth={tabWidthRef.current}
@@ -573,12 +686,11 @@ const TabBar = React.memo(({ workspace }: TabBarProps) => {
                     })}
                 </div>
             </div>
-            <div ref={addBtnRef} className="add-tab-btn" onClick={handleAddTab}>
-                <i className="fa fa-solid fa-plus fa-fw" />
+            <IconButton className="add-tab" ref={addBtnRef} decl={addtabButtonDecl} />
+            <div className="tab-bar-right">
+                <UpdateStatusBanner ref={updateStatusBannerRef} />
+                <ConfigErrorIcon buttonRef={configErrorButtonRef} />
             </div>
-            <WindowDrag ref={draggerRightRef} className="right" />
-            <UpdateStatusBanner buttonRef={updateStatusButtonRef} />
-            <ConfigErrorIcon buttonRef={configErrorButtonRef} />
         </div>
     );
 });

@@ -1,11 +1,14 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import electron from "electron";
+import { WindowService } from "@/app/store/services";
+import { RpcApi } from "@/app/store/wshclientapi";
+import { Notification } from "electron";
+import { getResolvedUpdateChannel } from "emain/updater";
 import { RpcResponseHelper, WshClient } from "../frontend/app/store/wshclient";
 import { getWebContentsByBlockId, webGetSelector } from "./emain-web";
-
-type WaveBrowserWindow = Electron.BrowserWindow & { waveWindowId: string; readyPromise: Promise<void> };
+import { createBrowserWindow, getWaveWindowById, getWaveWindowByWorkspaceId } from "./emain-window";
+import { unamePlatform } from "./platform";
 
 export class ElectronWshClientType extends WshClient {
     constructor() {
@@ -13,15 +16,14 @@ export class ElectronWshClientType extends WshClient {
     }
 
     async handle_webselector(rh: RpcResponseHelper, data: CommandWebSelectorData): Promise<string[]> {
-        if (!data.tabid || !data.blockid || !data.windowid) {
+        if (!data.tabid || !data.blockid || !data.workspaceid) {
             throw new Error("tabid and blockid are required");
         }
-        const windows = electron.BrowserWindow.getAllWindows();
-        const win = windows.find((w) => (w as WaveBrowserWindow).waveWindowId === data.windowid);
-        if (win == null) {
-            throw new Error(`no window found with id ${data.windowid}`);
+        const ww = getWaveWindowByWorkspaceId(data.workspaceid);
+        if (ww == null) {
+            throw new Error(`no window found with workspace ${data.workspaceid}`);
         }
-        const wc = await getWebContentsByBlockId(win, data.tabid, data.blockid);
+        const wc = await getWebContentsByBlockId(ww, data.tabid, data.blockid);
         if (wc == null) {
             throw new Error(`no webcontents found with blockid ${data.blockid}`);
         }
@@ -30,12 +32,40 @@ export class ElectronWshClientType extends WshClient {
     }
 
     async handle_notify(rh: RpcResponseHelper, notificationOptions: WaveNotificationOptions) {
-        new electron.Notification({
+        new Notification({
             title: notificationOptions.title,
             body: notificationOptions.body,
             silent: notificationOptions.silent,
         }).show();
     }
+
+    async handle_getupdatechannel(rh: RpcResponseHelper): Promise<string> {
+        return getResolvedUpdateChannel();
+    }
+
+    async handle_focuswindow(rh: RpcResponseHelper, windowId: string) {
+        console.log(`focuswindow ${windowId}`);
+        const fullConfig = await RpcApi.GetFullConfigCommand(ElectronWshClient);
+        let ww = getWaveWindowById(windowId);
+        if (ww == null) {
+            const window = await WindowService.GetWindow(windowId);
+            if (window == null) {
+                throw new Error(`window ${windowId} not found`);
+            }
+            ww = await createBrowserWindow(window, fullConfig, { unamePlatform });
+        }
+        ww.focus();
+    }
+
+    // async handle_workspaceupdate(rh: RpcResponseHelper) {
+    //     console.log("workspaceupdate");
+    //     fireAndForget(async () => {
+    //         console.log("workspace menu clicked");
+    //         const updatedWorkspaceMenu = await getWorkspaceMenu();
+    //         const workspaceMenu = Menu.getApplicationMenu().getMenuItemById("workspace-menu");
+    //         workspaceMenu.submenu = Menu.buildFromTemplate(updatedWorkspaceMenu);
+    //     });
+    // }
 }
 
 export let ElectronWshClient: ElectronWshClientType;

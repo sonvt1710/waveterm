@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package waveobj
@@ -28,7 +28,18 @@ const (
 	OType_Tab         = "tab"
 	OType_LayoutState = "layout"
 	OType_Block       = "block"
+	OType_Temp        = "temp"
 )
+
+var ValidOTypes = map[string]bool{
+	OType_Client:      true,
+	OType_Window:      true,
+	OType_Workspace:   true,
+	OType_Tab:         true,
+	OType_LayoutState: true,
+	OType_Block:       true,
+	OType_Temp:        true,
+}
 
 type WaveObjUpdate struct {
 	UpdateType string  `json:"updatetype"`
@@ -118,19 +129,18 @@ type Client struct {
 	Meta          MetaMapType `json:"meta"`
 	TosAgreed     int64       `json:"tosagreed,omitempty"`
 	HasOldHistory bool        `json:"hasoldhistory,omitempty"`
+	TempOID       string      `json:"tempoid,omitempty"`
 }
 
 func (*Client) GetOType() string {
 	return OType_Client
 }
 
-// stores the ui-context of the window
-// workspaceid, active tab, active block within each tab, window size, etc.
+// stores the ui-context of the window, points to a workspace containing the actual data being displayed in the window
 type Window struct {
 	OID         string      `json:"oid"`
 	Version     int         `json:"version"`
 	WorkspaceId string      `json:"workspaceid"`
-	ActiveTabId string      `json:"activetabid"`
 	IsNew       bool        `json:"isnew,omitempty"` // set when a window is created on the backend so the FE can size it properly.  cleared on first resize
 	Pos         Point       `json:"pos"`
 	WinSize     WinSize     `json:"winsize"`
@@ -142,12 +152,28 @@ func (*Window) GetOType() string {
 	return OType_Window
 }
 
+type WorkspaceListEntry struct {
+	WorkspaceId string `json:"workspaceid"`
+	WindowId    string `json:"windowid"`
+}
+
+type WorkspaceList []*WorkspaceListEntry
+
+type ActiveTabUpdate struct {
+	WorkspaceId    string `json:"workspaceid"`
+	NewActiveTabId string `json:"newactivetabid"`
+}
+
 type Workspace struct {
-	OID     string      `json:"oid"`
-	Version int         `json:"version"`
-	Name    string      `json:"name"`
-	TabIds  []string    `json:"tabids"`
-	Meta    MetaMapType `json:"meta"`
+	OID          string      `json:"oid"`
+	Version      int         `json:"version"`
+	Name         string      `json:"name,omitempty"`
+	Icon         string      `json:"icon,omitempty"`
+	Color        string      `json:"color,omitempty"`
+	TabIds       []string    `json:"tabids"`
+	PinnedTabIds []string    `json:"pinnedtabids"`
+	ActiveTabId  string      `json:"activetabid"`
+	Meta         MetaMapType `json:"meta"`
 }
 
 func (*Workspace) GetOType() string {
@@ -176,12 +202,15 @@ func (t *Tab) GetBlockORefs() []ORef {
 }
 
 type LayoutActionData struct {
-	ActionType string `json:"actiontype"`
-	BlockId    string `json:"blockid"`
-	NodeSize   *uint  `json:"nodesize,omitempty"`
-	IndexArr   *[]int `json:"indexarr,omitempty"`
-	Focused    bool   `json:"focused"`
-	Magnified  bool   `json:"magnified"`
+	ActionType    string `json:"actiontype"`
+	BlockId       string `json:"blockid"`
+	NodeSize      *uint  `json:"nodesize,omitempty"`
+	IndexArr      *[]int `json:"indexarr,omitempty"`
+	Focused       bool   `json:"focused"`
+	Magnified     bool   `json:"magnified"`
+	Ephemeral     bool   `json:"ephemeral"`
+	TargetBlockId string `json:"targetblockid,omitempty"`
+	Position      string `json:"position,omitempty"`
 }
 
 type LeafOrderEntry struct {
@@ -205,11 +234,8 @@ func (*LayoutState) GetOType() string {
 }
 
 type FileDef struct {
-	FileType string         `json:"filetype,omitempty"`
-	Path     string         `json:"path,omitempty"`
-	Url      string         `json:"url,omitempty"`
-	Content  string         `json:"content,omitempty"`
-	Meta     map[string]any `json:"meta,omitempty"`
+	Content string         `json:"content,omitempty"`
+	Meta    map[string]any `json:"meta,omitempty"`
 }
 
 type BlockDef struct {
@@ -252,11 +278,12 @@ type WinSize struct {
 
 type Block struct {
 	OID         string         `json:"oid"`
+	ParentORef  string         `json:"parentoref,omitempty"`
 	Version     int            `json:"version"`
-	BlockDef    *BlockDef      `json:"blockdef"`
 	RuntimeOpts *RuntimeOpts   `json:"runtimeopts,omitempty"`
 	Stickers    []*StickerType `json:"stickers,omitempty"`
 	Meta        MetaMapType    `json:"meta"`
+	SubBlockIds []string       `json:"subblockids,omitempty"`
 }
 
 func (*Block) GetOType() string {

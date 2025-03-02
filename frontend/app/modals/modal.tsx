@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { Button } from "@/app/element/button";
@@ -6,7 +6,7 @@ import clsx from "clsx";
 import { forwardRef } from "react";
 import ReactDOM from "react-dom";
 
-import "./modal.less";
+import "./modal.scss";
 
 interface ModalProps {
     children?: React.ReactNode;

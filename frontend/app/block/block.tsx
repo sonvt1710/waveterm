@@ -1,13 +1,21 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { BlockComponentModel2, BlockProps } from "@/app/block/blocktypes";
-import { PlotView } from "@/app/view/plotview/plotview";
-import { PreviewModel, PreviewView, makePreviewModel } from "@/app/view/preview/preview";
-import { SysinfoView, SysinfoViewModel, makeSysinfoViewModel } from "@/app/view/sysinfo/sysinfo";
+import {
+    BlockComponentModel2,
+    BlockNodeModel,
+    BlockProps,
+    FullBlockProps,
+    FullSubBlockProps,
+    SubBlockProps,
+} from "@/app/block/blocktypes";
+import { LauncherViewModel } from "@/app/view/launcher/launcher";
+import { PreviewModel } from "@/app/view/preview/preview";
+import { SysinfoViewModel } from "@/app/view/sysinfo/sysinfo";
+import { VDomModel } from "@/app/view/vdom/vdom-model";
 import { ErrorBoundary } from "@/element/errorboundary";
 import { CenteredDiv } from "@/element/quickelems";
-import { NodeModel, useDebouncedNodeInnerRect } from "@/layout/index";
+import { useDebouncedNodeInnerRect } from "@/layout/index";
 import {
     counterInc,
     getBlockComponentModel,
@@ -16,43 +24,35 @@ import {
 } from "@/store/global";
 import { getWaveObjectAtom, makeORef, useWaveObjectValue } from "@/store/wos";
 import { focusedBlockId, getElemAsStr } from "@/util/focusutil";
-import { isBlank } from "@/util/util";
-import { HelpView, HelpViewModel, makeHelpViewModel } from "@/view/helpview/helpview";
-import { QuickTipsView, QuickTipsViewModel } from "@/view/quicktipsview/quicktipsview";
-import { TermViewModel, TerminalView, makeTerminalModel } from "@/view/term/term";
-import { WaveAi, WaveAiModel, makeWaveAiViewModel } from "@/view/waveai/waveai";
-import { WebView, WebViewModel, makeWebViewModel } from "@/view/webview/webview";
+import { isBlank, useAtomValueSafe } from "@/util/util";
+import { HelpViewModel } from "@/view/helpview/helpview";
+import { TermViewModel } from "@/view/term/term";
+import { WaveAiModel } from "@/view/waveai/waveai";
+import { WebViewModel } from "@/view/webview/webview";
+import clsx from "clsx";
 import { atom, useAtomValue } from "jotai";
-import { Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import "./block.less";
+import { memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { QuickTipsViewModel } from "../view/quicktipsview/quicktipsview";
+import "./block.scss";
 import { BlockFrame } from "./blockframe";
 import { blockViewToIcon, blockViewToName } from "./blockutil";
 
-type FullBlockProps = {
-    preview: boolean;
-    nodeModel: NodeModel;
-    viewModel: ViewModel;
-};
+const BlockRegistry: Map<string, ViewModelClass> = new Map();
+BlockRegistry.set("term", TermViewModel);
+BlockRegistry.set("preview", PreviewModel);
+BlockRegistry.set("web", WebViewModel);
+BlockRegistry.set("waveai", WaveAiModel);
+BlockRegistry.set("cpuplot", SysinfoViewModel);
+BlockRegistry.set("sysinfo", SysinfoViewModel);
+BlockRegistry.set("vdom", VDomModel);
+BlockRegistry.set("tips", QuickTipsViewModel);
+BlockRegistry.set("help", HelpViewModel);
+BlockRegistry.set("launcher", LauncherViewModel);
 
-function makeViewModel(blockId: string, blockView: string, nodeModel: NodeModel): ViewModel {
-    if (blockView === "term") {
-        return makeTerminalModel(blockId);
-    }
-    if (blockView === "preview") {
-        return makePreviewModel(blockId, nodeModel);
-    }
-    if (blockView === "web") {
-        return makeWebViewModel(blockId, nodeModel);
-    }
-    if (blockView === "waveai") {
-        return makeWaveAiViewModel(blockId);
-    }
-    if (blockView === "cpuplot" || blockView == "sysinfo") {
-        // "cpuplot" is for backwards compatibility with already-opened widgets
-        return makeSysinfoViewModel(blockId, blockView);
-    }
-    if (blockView === "help") {
-        return makeHelpViewModel(blockId, nodeModel);
+function makeViewModel(blockId: string, blockView: string, nodeModel: BlockNodeModel): ViewModel {
+    const ctor = BlockRegistry.get(blockView);
+    if (ctor != null) {
+        return new ctor(blockId, nodeModel);
     }
     return makeDefaultViewModel(blockId, blockView);
 }
@@ -67,40 +67,11 @@ function getViewElem(
     if (isBlank(blockView)) {
         return <CenteredDiv>No View</CenteredDiv>;
     }
-    if (blockView === "term") {
-        return <TerminalView key={blockId} blockId={blockId} model={viewModel as TermViewModel} />;
+    if (viewModel.viewComponent == null) {
+        return <CenteredDiv>No View Component</CenteredDiv>;
     }
-    if (blockView === "preview") {
-        return (
-            <PreviewView
-                key={blockId}
-                blockId={blockId}
-                blockRef={blockRef}
-                contentRef={contentRef}
-                model={viewModel as PreviewModel}
-            />
-        );
-    }
-    if (blockView === "plot") {
-        return <PlotView key={blockId} />;
-    }
-    if (blockView === "web") {
-        return <WebView key={blockId} blockId={blockId} model={viewModel as WebViewModel} />;
-    }
-    if (blockView === "waveai") {
-        return <WaveAi key={blockId} blockId={blockId} model={viewModel as WaveAiModel} />;
-    }
-    if (blockView === "cpuplot" || blockView === "sysinfo") {
-        // "cpuplot" is for backwards compatibility with already opened widgets
-        return <SysinfoView key={blockId} blockId={blockId} model={viewModel as SysinfoViewModel} />;
-    }
-    if (blockView == "help") {
-        return <HelpView key={blockId} model={viewModel as HelpViewModel} />;
-    }
-    if (blockView == "tips") {
-        return <QuickTipsView key={blockId} model={viewModel as QuickTipsViewModel} />;
-    }
-    return <CenteredDiv>Invalid View "{blockView}"</CenteredDiv>;
+    const VC = viewModel.viewComponent;
+    return <VC key={blockId} blockId={blockId} blockRef={blockRef} contentRef={contentRef} model={viewModel} />;
 }
 
 function makeDefaultViewModel(blockId: string, viewType: string): ViewModel {
@@ -117,6 +88,7 @@ function makeDefaultViewModel(blockId: string, viewType: string): ViewModel {
         }),
         preIconButton: atom(null),
         endIconButtons: atom(null),
+        viewComponent: null,
     };
     return viewModel;
 }
@@ -137,6 +109,27 @@ const BlockPreview = memo(({ nodeModel, viewModel }: FullBlockProps) => {
     );
 });
 
+const BlockSubBlock = memo(({ nodeModel, viewModel }: FullSubBlockProps) => {
+    const [blockData] = useWaveObjectValue<Block>(makeORef("block", nodeModel.blockId));
+    const blockRef = useRef<HTMLDivElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
+    const viewElem = useMemo(
+        () => getViewElem(nodeModel.blockId, blockRef, contentRef, blockData?.meta?.view, viewModel),
+        [nodeModel.blockId, blockData?.meta?.view, viewModel]
+    );
+    const noPadding = useAtomValueSafe(viewModel.noPadding);
+    if (!blockData) {
+        return null;
+    }
+    return (
+        <div key="content" className={clsx("block-content", { "block-no-padding": noPadding })} ref={contentRef}>
+            <ErrorBoundary>
+                <Suspense fallback={<CenteredDiv>Loading...</CenteredDiv>}>{viewElem}</Suspense>
+            </ErrorBoundary>
+        </div>
+    );
+});
+
 const BlockFull = memo(({ nodeModel, viewModel }: FullBlockProps) => {
     counterInc("render-BlockFull");
     const focusElemRef = useRef<HTMLInputElement>(null);
@@ -147,6 +140,7 @@ const BlockFull = memo(({ nodeModel, viewModel }: FullBlockProps) => {
     const isFocused = useAtomValue(nodeModel.isFocused);
     const disablePointerEvents = useAtomValue(nodeModel.disablePointerEvents);
     const innerRect = useDebouncedNodeInnerRect(nodeModel);
+    const noPadding = useAtomValueSafe(viewModel.noPadding);
 
     useLayoutEffect(() => {
         setBlockClicked(isFocused);
@@ -244,7 +238,12 @@ const BlockFull = memo(({ nodeModel, viewModel }: FullBlockProps) => {
                     onChange={() => {}}
                 />
             </div>
-            <div key="content" className="block-content" ref={contentRef} style={blockContentStyle}>
+            <div
+                key="content"
+                className={clsx("block-content", { "block-no-padding": noPadding })}
+                ref={contentRef}
+                style={blockContentStyle}
+            >
                 <ErrorBoundary>
                     <Suspense fallback={<CenteredDiv>Loading...</CenteredDiv>}>{viewElem}</Suspense>
                 </ErrorBoundary>
@@ -255,7 +254,7 @@ const BlockFull = memo(({ nodeModel, viewModel }: FullBlockProps) => {
 
 const Block = memo((props: BlockProps) => {
     counterInc("render-Block");
-    counterInc("render-Block-" + props.nodeModel.blockId.substring(0, 8));
+    counterInc("render-Block-" + props.nodeModel?.blockId?.substring(0, 8));
     const [blockData, loading] = useWaveObjectValue<Block>(makeORef("block", props.nodeModel.blockId));
     const bcm = getBlockComponentModel(props.nodeModel.blockId);
     let viewModel = bcm?.viewModel;
@@ -266,6 +265,7 @@ const Block = memo((props: BlockProps) => {
     useEffect(() => {
         return () => {
             unregisterBlockComponentModel(props.nodeModel.blockId);
+            viewModel?.dispose?.();
         };
     }, []);
     if (loading || isBlank(props.nodeModel.blockId) || blockData == null) {
@@ -277,4 +277,26 @@ const Block = memo((props: BlockProps) => {
     return <BlockFull {...props} viewModel={viewModel} />;
 });
 
-export { Block };
+const SubBlock = memo((props: SubBlockProps) => {
+    counterInc("render-Block");
+    counterInc("render-Block-" + props.nodeModel?.blockId?.substring(0, 8));
+    const [blockData, loading] = useWaveObjectValue<Block>(makeORef("block", props.nodeModel.blockId));
+    const bcm = getBlockComponentModel(props.nodeModel.blockId);
+    let viewModel = bcm?.viewModel;
+    if (viewModel == null || viewModel.viewType != blockData?.meta?.view) {
+        viewModel = makeViewModel(props.nodeModel.blockId, blockData?.meta?.view, props.nodeModel);
+        registerBlockComponentModel(props.nodeModel.blockId, { viewModel });
+    }
+    useEffect(() => {
+        return () => {
+            unregisterBlockComponentModel(props.nodeModel.blockId);
+            viewModel?.dispose?.();
+        };
+    }, []);
+    if (loading || isBlank(props.nodeModel.blockId) || blockData == null) {
+        return null;
+    }
+    return <BlockSubBlock {...props} viewModel={viewModel} />;
+});
+
+export { Block, SubBlock };

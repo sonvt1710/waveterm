@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { handleWaveEvent } from "@/app/store/wps";
@@ -15,12 +15,12 @@ type RouteInfo = {
     destRouteId: string;
 };
 
-function makeWindowRouteId(windowId: string): string {
-    return `window:${windowId}`;
-}
-
 function makeFeBlockRouteId(feBlockId: string): string {
     return `feblock:${feBlockId}`;
+}
+
+function makeTabRouteId(tabId: string): string {
+    return `tab:${tabId}`;
 }
 
 class WshRouter {
@@ -149,4 +149,4 @@ class WshRouter {
     }
 }
 
-export { makeFeBlockRouteId, makeWindowRouteId, WshRouter };
+export { makeFeBlockRouteId, makeTabRouteId, WshRouter };

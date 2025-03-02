@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package wshutil
@@ -12,6 +12,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -19,6 +22,10 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/wavetermdev/waveterm/pkg/panichandler"
+	"github.com/wavetermdev/waveterm/pkg/util/packetparser"
+	"github.com/wavetermdev/waveterm/pkg/util/shellutil"
+	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc"
 	"golang.org/x/term"
@@ -40,7 +47,7 @@ const ESC = 0x1b
 const DefaultOutputChSize = 32
 const DefaultInputChSize = 32
 
-const WaveJwtTokenVarName = "WAVETERM_JWT"
+const WaveJwtTokenVarName = wavebase.WaveJwtTokenVarName
 
 // OSC escape types
 // OSC 23198 ; (JSON | base64-JSON) ST
@@ -67,9 +74,13 @@ func makeOscPrefix(oscNum string) []byte {
 	return output
 }
 
-func EncodeWaveOSCBytes(oscNum string, barr []byte) []byte {
+func EncodeWaveOSCBytes(oscNum string, barr []byte) ([]byte, error) {
 	if len(oscNum) != 5 {
-		panic("oscNum must be 5 characters")
+		return nil, fmt.Errorf("oscNum must be 5 characters")
+	}
+	const maxSize = 64 * 1024 * 1024 // 64 MB
+	if len(barr) > maxSize {
+		return nil, fmt.Errorf("input data too large")
 	}
 	hasControlChars := false
 	for _, b := range barr {
@@ -85,7 +96,7 @@ func EncodeWaveOSCBytes(oscNum string, barr []byte) []byte {
 		copyOscPrefix(output, oscNum)
 		copy(output[oscPrefixLen(oscNum):], barr)
 		output[len(output)-1] = BEL
-		return output
+		return output, nil
 	}
 
 	var buf bytes.Buffer
@@ -101,7 +112,7 @@ func EncodeWaveOSCBytes(oscNum string, barr []byte) []byte {
 		}
 	}
 	buf.WriteByte(BEL)
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 func EncodeWaveOSCMessageEx(oscNum string, msg *RpcMessage) ([]byte, error) {
@@ -112,7 +123,7 @@ func EncodeWaveOSCMessageEx(oscNum string, msg *RpcMessage) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error marshalling message to json: %w", err)
 	}
-	return EncodeWaveOSCBytes(oscNum, barr), nil
+	return EncodeWaveOSCBytes(oscNum, barr)
 }
 
 var termModeLock = sync.Mutex{}
@@ -145,6 +156,9 @@ func installShutdownSignalHandlers(quiet bool) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
+		defer func() {
+			panichandler.PanicHandlerNoTelemetry("installShutdownSignalHandlers", recover())
+		}()
 		for sig := range sigCh {
 			DoShutdown(fmt.Sprintf("got signal %v", sig), 1, quiet)
 			break
@@ -187,25 +201,53 @@ func RestoreTermState() {
 }
 
 // returns (wshRpc, wrappedStdin)
-func SetupTerminalRpcClient(serverImpl ServerImpl) (*WshRpc, io.Reader) {
+func SetupTerminalRpcClient(serverImpl ServerImpl, debugStr string) (*WshRpc, io.Reader) {
 	messageCh := make(chan []byte, DefaultInputChSize)
 	outputCh := make(chan []byte, DefaultOutputChSize)
 	ptyBuf := MakePtyBuffer(WaveServerOSCPrefix, os.Stdin, messageCh)
-	rpcClient := MakeWshRpc(messageCh, outputCh, wshrpc.RpcContext{}, serverImpl)
+	rpcClient := MakeWshRpc(messageCh, outputCh, wshrpc.RpcContext{}, serverImpl, debugStr)
 	go func() {
+		defer func() {
+			panichandler.PanicHandler("SetupTerminalRpcClient", recover())
+		}()
 		for msg := range outputCh {
-			barr := EncodeWaveOSCBytes(WaveOSC, msg)
+			barr, err := EncodeWaveOSCBytes(WaveOSC, msg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error encoding OSC message: %v\n", err)
+				continue
+			}
 			os.Stdout.Write(barr)
+			os.Stdout.Write([]byte{'\n'})
 		}
 	}()
 	return rpcClient, ptyBuf
 }
 
-func SetupConnRpcClient(conn net.Conn, serverImpl ServerImpl) (*WshRpc, chan error, error) {
+func SetupPacketRpcClient(input io.Reader, output io.Writer, serverImpl ServerImpl, debugStr string) (*WshRpc, chan []byte) {
+	messageCh := make(chan []byte, DefaultInputChSize)
+	outputCh := make(chan []byte, DefaultOutputChSize)
+	rawCh := make(chan []byte, DefaultOutputChSize)
+	rpcClient := MakeWshRpc(messageCh, outputCh, wshrpc.RpcContext{}, serverImpl, debugStr)
+	go packetparser.Parse(input, messageCh, rawCh)
+	go func() {
+		defer func() {
+			panichandler.PanicHandler("SetupPacketRpcClient:outputloop", recover())
+		}()
+		for msg := range outputCh {
+			packetparser.WritePacket(output, msg)
+		}
+	}()
+	return rpcClient, rawCh
+}
+
+func SetupConnRpcClient(conn net.Conn, serverImpl ServerImpl, debugStr string) (*WshRpc, chan error, error) {
 	inputCh := make(chan []byte, DefaultInputChSize)
 	outputCh := make(chan []byte, DefaultOutputChSize)
 	writeErrCh := make(chan error, 1)
 	go func() {
+		defer func() {
+			panichandler.PanicHandler("SetupConnRpcClient:AdaptOutputChToStream", recover())
+		}()
 		writeErr := AdaptOutputChToStream(outputCh, conn)
 		if writeErr != nil {
 			writeErrCh <- writeErr
@@ -213,21 +255,39 @@ func SetupConnRpcClient(conn net.Conn, serverImpl ServerImpl) (*WshRpc, chan err
 		}
 	}()
 	go func() {
+		defer func() {
+			panichandler.PanicHandler("SetupConnRpcClient:AdaptStreamToMsgCh", recover())
+		}()
 		// when input is closed, close the connection
 		defer conn.Close()
 		AdaptStreamToMsgCh(conn, inputCh)
 	}()
-	rtn := MakeWshRpc(inputCh, outputCh, wshrpc.RpcContext{}, serverImpl)
+	rtn := MakeWshRpc(inputCh, outputCh, wshrpc.RpcContext{}, serverImpl, debugStr)
 	return rtn, writeErrCh, nil
 }
 
-func SetupDomainSocketRpcClient(sockName string, serverImpl ServerImpl) (*WshRpc, error) {
-	conn, err := net.Dial("unix", sockName)
+func tryTcpSocket(sockName string) (net.Conn, error) {
+	addr, err := net.ResolveTCPAddr("tcp", sockName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Unix domain socket: %w", err)
+		return nil, err
 	}
-	rtn, errCh, err := SetupConnRpcClient(conn, serverImpl)
+	return net.DialTCP("tcp", nil, addr)
+}
+
+func SetupDomainSocketRpcClient(sockName string, serverImpl ServerImpl, debugName string) (*WshRpc, error) {
+	conn, tcpErr := tryTcpSocket(sockName)
+	var unixErr error
+	if tcpErr != nil {
+		conn, unixErr = net.Dial("unix", sockName)
+	}
+	if tcpErr != nil && unixErr != nil {
+		return nil, fmt.Errorf("failed to connect to tcp or unix domain socket: tcp err:%w: unix socket err: %w", tcpErr, unixErr)
+	}
+	rtn, errCh, err := SetupConnRpcClient(conn, serverImpl, debugName)
 	go func() {
+		defer func() {
+			panichandler.PanicHandler("SetupDomainSocketRpcClient:closeConn", recover())
+		}()
 		defer conn.Close()
 		err := <-errCh
 		if err != nil && err != io.EOF {
@@ -355,10 +415,65 @@ func MakeRouteIdFromCtx(rpcCtx *wshrpc.RpcContext) (string, error) {
 	return MakeProcRouteId(procId), nil
 }
 
+type WriteFlusher interface {
+	Write([]byte) (int, error)
+	Flush() error
+}
+
+// blocking, returns if there is an error, or on EOF of input
+func HandleStdIOClient(logName string, input chan utilfn.LineOutput, output io.Writer) {
+	proxy := MakeRpcMultiProxy()
+	rawCh := make(chan []byte, DefaultInputChSize)
+	go packetparser.ParseWithLinesChan(input, proxy.FromRemoteRawCh, rawCh)
+	doneCh := make(chan struct{})
+	var doneOnce sync.Once
+	closeDoneCh := func() {
+		doneOnce.Do(func() {
+			close(doneCh)
+		})
+		proxy.DisposeRoutes()
+	}
+	go func() {
+		defer func() {
+			panichandler.PanicHandler("HandleStdIOClient:RunUnauthLoop", recover())
+		}()
+		proxy.RunUnauthLoop()
+	}()
+	go func() {
+		defer func() {
+			panichandler.PanicHandler("HandleStdIOClient:ToRemoteChLoop", recover())
+		}()
+		defer closeDoneCh()
+		for msg := range proxy.ToRemoteCh {
+			err := packetparser.WritePacket(output, msg)
+			if err != nil {
+				log.Printf("[%s] error writing to output: %v\n", logName, err)
+				break
+			}
+		}
+	}()
+	go func() {
+		defer func() {
+			panichandler.PanicHandler("HandleStdIOClient:RawChLoop", recover())
+		}()
+		defer closeDoneCh()
+		for msg := range rawCh {
+			if !bytes.HasSuffix(msg, []byte{'\n'}) {
+				msg = append(msg, '\n')
+			}
+			log.Printf("[%s:stdout] %s", logName, msg)
+		}
+	}()
+	<-doneCh
+}
+
 func handleDomainSocketClient(conn net.Conn) {
 	var routeIdContainer atomic.Pointer[string]
 	proxy := MakeRpcProxy()
 	go func() {
+		defer func() {
+			panichandler.PanicHandler("handleDomainSocketClient:AdaptOutputChToStream", recover())
+		}()
 		writeErr := AdaptOutputChToStream(proxy.ToRemoteCh, conn)
 		if writeErr != nil {
 			log.Printf("error writing to domain socket: %v\n", writeErr)
@@ -367,7 +482,12 @@ func handleDomainSocketClient(conn net.Conn) {
 	go func() {
 		// when input is closed, close the connection
 		defer func() {
+			panichandler.PanicHandler("handleDomainSocketClient:AdaptStreamToMsgCh", recover())
+		}()
+		defer func() {
 			conn.Close()
+			close(proxy.FromRemoteCh)
+			close(proxy.ToRemoteCh)
 			routeIdPtr := routeIdContainer.Load()
 			if routeIdPtr != nil && *routeIdPtr != "" {
 				DefaultRouter.UnregisterRoute(*routeIdPtr)
@@ -391,7 +511,7 @@ func handleDomainSocketClient(conn net.Conn) {
 		return
 	}
 	routeIdContainer.Store(&routeId)
-	DefaultRouter.RegisterRoute(routeId, proxy)
+	DefaultRouter.RegisterRoute(routeId, proxy, true)
 }
 
 // only for use on client
@@ -425,5 +545,45 @@ func ExtractUnverifiedSocketName(tokenStr string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("sock claim is missing or invalid")
 	}
+	sockName = wavebase.ExpandHomeDirSafe(sockName)
 	return sockName, nil
+}
+
+func getShell() string {
+	if runtime.GOOS == "darwin" {
+		return shellutil.GetMacUserShell()
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		return "/bin/bash"
+	}
+	return strings.TrimSpace(shell)
+}
+
+func GetInfo() wshrpc.RemoteInfo {
+	return wshrpc.RemoteInfo{
+		ClientArch:    runtime.GOARCH,
+		ClientOs:      runtime.GOOS,
+		ClientVersion: wavebase.WaveVersion,
+		Shell:         getShell(),
+	}
+
+}
+
+func InstallRcFiles() error {
+	home := wavebase.GetHomeDir()
+	waveDir := filepath.Join(home, wavebase.RemoteWaveHomeDirName)
+	wshBinDir := filepath.Join(waveDir, wavebase.RemoteWshBinDirName)
+	return shellutil.InitRcFiles(waveDir, wshBinDir)
+}
+
+func SendErrCh[T any](err error) <-chan wshrpc.RespOrErrorUnion[T] {
+	ch := make(chan wshrpc.RespOrErrorUnion[T], 1)
+	ch <- RespErr[T](err)
+	close(ch)
+	return ch
+}
+
+func RespErr[T any](err error) wshrpc.RespOrErrorUnion[T] {
+	return wshrpc.RespOrErrorUnion[T]{Error: err}
 }

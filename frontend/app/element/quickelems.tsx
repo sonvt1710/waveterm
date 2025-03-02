@@ -1,8 +1,8 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import React from "react";
-import "./quickelems.less";
+import "./quickelems.scss";
 
 function CenteredLoadingDiv() {
     return <CenteredDiv>loading...</CenteredDiv>;

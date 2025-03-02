@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { Block } from "@/app/block/block";
@@ -11,7 +11,7 @@ import * as WOS from "@/store/wos";
 import { atom, useAtomValue } from "jotai";
 import * as React from "react";
 import { useMemo } from "react";
-import "./tabcontent.less";
+import "./tabcontent.scss";
 
 const tileGapSizeAtom = atom((get) => {
     const settings = get(atoms.settingsAtom);

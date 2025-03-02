@@ -1,10 +1,10 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { Button } from "@/element/button";
 import React from "react";
 
-import "./modal.less";
+import "./modal.scss";
 
 interface ModalProps {
     id?: string;

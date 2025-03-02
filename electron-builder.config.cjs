@@ -53,19 +53,36 @@ const config = {
         minimumSystemVersion: "10.15.0",
         mergeASARs: true,
         singleArchFiles: "dist/bin/wavesrv.*",
+        entitlements: "build/entitlements.mac.plist",
+        entitlementsInherit: "build/entitlements.mac.plist",
+        extendInfo: {
+            NSContactsUsageDescription: "A CLI application running in Wave wants to use your contacts.",
+            NSRemindersUsageDescription: "A CLI application running in Wave wants to use your reminders.",
+            NSLocationWhenInUseUsageDescription:
+                "A CLI application running in Wave wants to use your location information while active.",
+            NSLocationAlwaysUsageDescription:
+                "A CLI application running in Wave wants to use your location information, even in the background.",
+            NSCameraUsageDescription: "A CLI application running in Wave wants to use the camera.",
+            NSMicrophoneUsageDescription: "A CLI application running in Wave wants to use your microphone.",
+            NSCalendarsUsageDescription: "A CLI application running in Wave wants to use Calendar data.",
+            NSLocationUsageDescription: "A CLI application running in Wave wants to use your location information.",
+            NSAppleEventsUsageDescription: "A CLI application running in Wave wants to use AppleScript.",
+        },
     },
     linux: {
         artifactName: "${name}-${platform}-${arch}-${version}.${ext}",
         category: "TerminalEmulator",
         executableName: pkg.name,
-        target: ["zip", "deb", "rpm", "AppImage", "pacman"],
+        target: ["zip", "deb", "rpm", "snap", "AppImage", "pacman"],
         synopsis: pkg.description,
         description: null,
         desktop: {
-            Name: pkg.productName,
-            Comment: pkg.description,
-            Keywords: "developer;terminal;emulator;",
-            category: "Development;Utility;",
+            entry: {
+                Name: pkg.productName,
+                Comment: pkg.description,
+                Keywords: "developer;terminal;emulator;",
+                Categories: "Development;Utility;",
+            },
         },
         executableArgs: ["--enable-features", "UseOzonePlatform", "--ozone-platform-hint", "auto"], // Hint Electron to use Ozone abstraction layer for native Wayland support
     },
@@ -84,17 +101,15 @@ const config = {
     appImage: {
         license: "LICENSE",
     },
+    snap: {
+        base: "core22",
+        confinement: "classic",
+        allowNativeWayland: true,
+        artifactName: "${name}_${version}_${arch}.${ext}",
+    },
     publish: {
         provider: "generic",
         url: "https://dl.waveterm.dev/releases-w2",
-    },
-    beforePack: () => {
-        const staticSourcePath = process.env.STATIC_DOCSITE_PATH;
-        const staticDestPath = "dist/docsite";
-        if (staticSourcePath) {
-            console.log(`Static docsite path is specified, copying from "${staticSourcePath}" to "${staticDestPath}"`);
-            fs.cpSync(staticSourcePath, staticDestPath, { recursive: true });
-        }
     },
     afterPack: (context) => {
         // This is a workaround to restore file permissions to the wavesrv binaries on macOS after packaging the universal binary.

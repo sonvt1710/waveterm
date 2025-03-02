@@ -1,11 +1,11 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { TileLayout } from "./lib/TileLayout";
 import { LayoutModel } from "./lib/layoutModel";
 import {
     deleteLayoutModelForTab,
-    getLayoutModelForActiveTab,
+    getLayoutModelForStaticTab,
     getLayoutModelForTab,
     getLayoutModelForTabById,
     useDebouncedNodeInnerRect,
@@ -37,7 +37,7 @@ import { DropDirection, LayoutTreeActionType, NavigateDirection } from "./lib/ty
 export {
     deleteLayoutModelForTab,
     DropDirection,
-    getLayoutModelForActiveTab,
+    getLayoutModelForStaticTab,
     getLayoutModelForTab,
     getLayoutModelForTabById,
     LayoutModel,

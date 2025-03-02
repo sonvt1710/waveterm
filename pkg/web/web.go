@@ -1,4 +1,4 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package web
@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -25,15 +24,16 @@ import (
 	"github.com/wavetermdev/waveterm/pkg/authkey"
 	"github.com/wavetermdev/waveterm/pkg/docsite"
 	"github.com/wavetermdev/waveterm/pkg/filestore"
+	"github.com/wavetermdev/waveterm/pkg/panichandler"
+	"github.com/wavetermdev/waveterm/pkg/remote/fileshare"
+	"github.com/wavetermdev/waveterm/pkg/schema"
 	"github.com/wavetermdev/waveterm/pkg/service"
-	"github.com/wavetermdev/waveterm/pkg/telemetry"
+	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
-	"github.com/wavetermdev/waveterm/pkg/waveobj"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc/wshclient"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc/wshserver"
 	"github.com/wavetermdev/waveterm/pkg/wshutil"
-	"github.com/wavetermdev/waveterm/pkg/wstore"
 )
 
 type WebFnType = func(http.ResponseWriter, *http.Request)
@@ -246,11 +246,16 @@ func handleLocalStreamFile(w http.ResponseWriter, r *http.Request, path string, 
 	}
 }
 
-func handleRemoteStreamFile(w http.ResponseWriter, r *http.Request, conn string, path string, no404 bool) error {
+func handleRemoteStreamFile(w http.ResponseWriter, req *http.Request, conn string, path string, no404 bool) error {
 	client := wshserver.GetMainRpcClient()
 	streamFileData := wshrpc.CommandRemoteStreamFileData{Path: path}
 	route := wshutil.MakeConnectionRouteId(conn)
-	rtnCh := wshclient.RemoteStreamFileCommand(client, streamFileData, &wshrpc.RpcOpts{Route: route})
+	rpcOpts := &wshrpc.RpcOpts{Route: route, Timeout: 60 * 1000}
+	rtnCh := wshclient.RemoteStreamFileCommand(client, streamFileData, rpcOpts)
+	return handleRemoteStreamFileFromCh(w, req, path, rtnCh, rpcOpts.StreamCancelFn, no404)
+}
+
+func handleRemoteStreamFileFromCh(w http.ResponseWriter, req *http.Request, path string, rtnCh <-chan wshrpc.RespOrErrorUnion[wshrpc.FileData], streamCancelFn func(), no404 bool) error {
 	firstPk := true
 	var fileInfo *wshrpc.FileInfo
 	loopDone := false
@@ -259,50 +264,68 @@ func handleRemoteStreamFile(w http.ResponseWriter, r *http.Request, conn string,
 			return
 		}
 		// if loop didn't finish naturally clear it out
-		go func() {
-			for range rtnCh {
-			}
-		}()
+		utilfn.DrainChannelSafe(rtnCh, "handleRemoteStreamFile")
 	}()
-	for respUnion := range rtnCh {
-		if respUnion.Error != nil {
-			return respUnion.Error
-		}
-		if firstPk {
-			firstPk = false
-			if len(respUnion.Response.FileInfo) != 1 {
-				return fmt.Errorf("stream file protocol error, first pk fileinfo len=%d", len(respUnion.Response.FileInfo))
+	ctx := req.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			if streamCancelFn != nil {
+				streamCancelFn()
 			}
-			fileInfo = respUnion.Response.FileInfo[0]
-			if fileInfo.NotFound {
-				if no404 {
-					serveTransparentGIF(w)
-					return nil
-				} else {
-					return fmt.Errorf("file not found: %q", path)
+			return ctx.Err()
+		case respUnion, ok := <-rtnCh:
+			if !ok {
+				loopDone = true
+				return nil
+			}
+			if respUnion.Error != nil {
+				return respUnion.Error
+			}
+			if firstPk {
+				firstPk = false
+				if respUnion.Response.Info == nil {
+					return fmt.Errorf("stream file protocol error, fileinfo is empty")
 				}
+				fileInfo = respUnion.Response.Info
+				if fileInfo.NotFound {
+					if no404 {
+						serveTransparentGIF(w)
+						return nil
+					} else {
+						return fmt.Errorf("file not found: %q", path)
+					}
+				}
+				if fileInfo.IsDir {
+					return fmt.Errorf("cannot stream directory: %q", path)
+				}
+				w.Header().Set(ContentTypeHeaderKey, fileInfo.MimeType)
+				w.Header().Set(ContentLengthHeaderKey, fmt.Sprintf("%d", fileInfo.Size))
+				continue
 			}
-			if fileInfo.IsDir {
-				return fmt.Errorf("cannot stream directory: %q", path)
+			if respUnion.Response.Data64 == "" {
+				continue
 			}
-			w.Header().Set(ContentTypeHeaderKey, fileInfo.MimeType)
-			w.Header().Set(ContentLengthHeaderKey, fmt.Sprintf("%d", fileInfo.Size))
-			continue
-		}
-		if respUnion.Response.Data64 == "" {
-			continue
-		}
-		decoder := base64.NewDecoder(base64.StdEncoding, bytes.NewReader([]byte(respUnion.Response.Data64)))
-		_, err := io.Copy(w, decoder)
-		if err != nil {
-			log.Printf("error streaming file %q: %v\n", path, err)
-			// not sure what to do here, the headers have already been sent.
-			// just return
-			return nil
+			decoder := base64.NewDecoder(base64.StdEncoding, bytes.NewReader([]byte(respUnion.Response.Data64)))
+			_, err := io.Copy(w, decoder)
+			if err != nil {
+				log.Printf("error streaming file %q: %v\n", path, err)
+				// not sure what to do here, the headers have already been sent.
+				// just return
+				return nil
+			}
 		}
 	}
-	loopDone = true
-	return nil
+}
+
+func handleStreamLocalFile(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	no404 := r.URL.Query().Get("no404")
+	handleLocalStreamFile(w, r, path, no404 != "")
 }
 
 func handleStreamFile(w http.ResponseWriter, r *http.Request) {
@@ -316,14 +339,16 @@ func handleStreamFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	no404 := r.URL.Query().Get("no404")
-	if conn == wshrpc.LocalConnName {
-		handleLocalStreamFile(w, r, path, no404 != "")
-	} else {
-		err := handleRemoteStreamFile(w, r, conn, path, no404 != "")
-		if err != nil {
-			log.Printf("error streaming remote file %q %q: %v\n", conn, path, err)
-			http.Error(w, fmt.Sprintf("error streaming file: %v", err), http.StatusInternalServerError)
-		}
+	data := wshrpc.FileData{
+		Info: &wshrpc.FileInfo{
+			Path: path,
+		},
+	}
+	rtnCh := fileshare.ReadStream(r.Context(), data)
+	err := handleRemoteStreamFileFromCh(w, r, path, rtnCh, nil, no404 != "")
+	if err != nil {
+		log.Printf("error streaming file %q %q: %v\n", conn, path, err)
+		http.Error(w, fmt.Sprintf("error streaming file: %v", err), http.StatusInternalServerError)
 	}
 }
 
@@ -358,52 +383,21 @@ type ClientActiveState struct {
 	Open   bool `json:"open"`
 }
 
-// params: fg, active, open
-func handleLogActiveState(w http.ResponseWriter, r *http.Request) {
-	decoder := json.NewDecoder(r.Body)
-	var activeState ClientActiveState
-	err := decoder.Decode(&activeState)
-	if err != nil {
-		WriteJsonError(w, fmt.Errorf("error decoding json: %v", err))
-		return
-	}
-	activity := telemetry.ActivityUpdate{}
-	if activeState.Fg {
-		activity.FgMinutes = 1
-	}
-	if activeState.Active {
-		activity.ActiveMinutes = 1
-	}
-	if activeState.Open {
-		activity.OpenMinutes = 1
-	}
-	activity.NumTabs, _ = wstore.DBGetCount[*waveobj.Tab](r.Context())
-	err = telemetry.UpdateActivity(r.Context(), activity)
-	if err != nil {
-		WriteJsonError(w, fmt.Errorf("error updating activity: %w", err))
-		return
-	}
-	WriteJsonSuccess(w, true)
-}
-
 func WebFnWrap(opts WebFnOpts, fn WebFnType) WebFnType {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			recErr := recover()
+			recErr := panichandler.PanicHandler("WebFnWrap", recover())
 			if recErr == nil {
 				return
 			}
-			panicStr := fmt.Sprintf("panic: %v", recErr)
-			log.Printf("panic: %v\n", recErr)
-			debug.PrintStack()
 			if opts.JsonErrors {
-				jsonRtn := marshalReturnValue(nil, fmt.Errorf(panicStr))
+				jsonRtn := marshalReturnValue(nil, recErr)
 				w.Header().Set(ContentTypeHeaderKey, ContentTypeJson)
 				w.Header().Set(ContentLengthHeaderKey, fmt.Sprintf("%d", len(jsonRtn)))
 				w.WriteHeader(http.StatusOK)
 				w.Write(jsonRtn)
 			} else {
-				http.Error(w, panicStr, http.StatusInternalServerError)
+				http.Error(w, recErr.Error(), http.StatusInternalServerError)
 			}
 		}()
 		if !opts.AllowCaching {
@@ -431,7 +425,7 @@ func MakeTCPListener(serviceName string) (net.Listener, error) {
 }
 
 func MakeUnixListener() (net.Listener, error) {
-	serverAddr := wavebase.GetWaveHomeDir() + "/wave.sock"
+	serverAddr := wavebase.GetDomainSocketName()
 	os.Remove(serverAddr) // ignore error
 	rtn, err := net.Listen("unix", serverAddr)
 	if err != nil {
@@ -443,15 +437,19 @@ func MakeUnixListener() (net.Listener, error) {
 }
 
 const docsitePrefix = "/docsite/"
+const schemaPrefix = "/schema/"
 
 // blocking
 func RunWebServer(listener net.Listener) {
 	gr := mux.NewRouter()
+	gr.HandleFunc("/wave/stream-local-file", WebFnWrap(WebFnOpts{AllowCaching: true}, handleStreamLocalFile))
 	gr.HandleFunc("/wave/stream-file", WebFnWrap(WebFnOpts{AllowCaching: true}, handleStreamFile))
+	gr.PathPrefix("/wave/stream-file/").HandlerFunc(WebFnWrap(WebFnOpts{AllowCaching: true}, handleStreamFile))
 	gr.HandleFunc("/wave/file", WebFnWrap(WebFnOpts{AllowCaching: false}, handleWaveFile))
 	gr.HandleFunc("/wave/service", WebFnWrap(WebFnOpts{JsonErrors: true}, handleService))
-	gr.HandleFunc("/wave/log-active-state", WebFnWrap(WebFnOpts{JsonErrors: true}, handleLogActiveState))
+	gr.HandleFunc("/vdom/{uuid}/{path:.*}", WebFnWrap(WebFnOpts{AllowCaching: true}, handleVDom))
 	gr.PathPrefix(docsitePrefix).Handler(http.StripPrefix(docsitePrefix, docsite.GetDocsiteHandler()))
+	gr.PathPrefix(schemaPrefix).Handler(http.StripPrefix(schemaPrefix, schema.GetSchemaHandler()))
 	handler := http.TimeoutHandler(gr, HttpTimeoutDuration, "Timeout")
 	if wavebase.IsDevMode() {
 		handler = handlers.CORS(handlers.AllowedOrigins([]string{"*"}))(handler)

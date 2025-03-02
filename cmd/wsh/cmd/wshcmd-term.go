@@ -1,10 +1,10 @@
-// Copyright 2024, Command Line Inc.
+// Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package cmd
 
 import (
-	"log"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -21,7 +21,7 @@ var termCmd = &cobra.Command{
 	Use:     "term",
 	Short:   "open a terminal in directory",
 	Args:    cobra.RangeArgs(0, 1),
-	Run:     termRun,
+	RunE:    termRun,
 	PreRunE: preRunSetupRpcClient,
 }
 
@@ -30,47 +30,49 @@ func init() {
 	rootCmd.AddCommand(termCmd)
 }
 
-func termRun(cmd *cobra.Command, args []string) {
+func termRun(cmd *cobra.Command, args []string) (rtnErr error) {
+	defer func() {
+		sendActivity("term", rtnErr == nil)
+	}()
+
 	var cwd string
 	if len(args) > 0 {
 		cwd = args[0]
 		cwdExpanded, err := wavebase.ExpandHomeDir(cwd)
 		if err != nil {
-			log.Fatal(err)
-			return
+			return err
 		}
 		cwd = cwdExpanded
 	} else {
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			WriteStderr("[error] getting current directory: %v\n", err)
-			return
+			return fmt.Errorf("getting current directory: %w", err)
 		}
 	}
 	var err error
 	cwd, err = filepath.Abs(cwd)
 	if err != nil {
-		WriteStderr("[error] getting absolute path: %v\n", err)
-		return
+		return fmt.Errorf("getting absolute path: %w", err)
+	}
+	createMeta := map[string]any{
+		waveobj.MetaKey_View:       "term",
+		waveobj.MetaKey_CmdCwd:     cwd,
+		waveobj.MetaKey_Controller: "shell",
+	}
+	if RpcContext.Conn != "" {
+		createMeta[waveobj.MetaKey_Connection] = RpcContext.Conn
 	}
 	createBlockData := wshrpc.CommandCreateBlockData{
 		BlockDef: &waveobj.BlockDef{
-			Meta: map[string]interface{}{
-				waveobj.MetaKey_View:       "term",
-				waveobj.MetaKey_CmdCwd:     cwd,
-				waveobj.MetaKey_Controller: "shell",
-			},
+			Meta: createMeta,
 		},
 		Magnified: termMagnified,
 	}
-	if RpcContext.Conn != "" {
-		createBlockData.BlockDef.Meta[waveobj.MetaKey_Connection] = RpcContext.Conn
-	}
 	oref, err := wshclient.CreateBlockCommand(RpcClient, createBlockData, nil)
 	if err != nil {
-		WriteStderr("[error] creating new terminal block: %v\n", err)
-		return
+		return fmt.Errorf("creating new terminal block: %w", err)
 	}
 	WriteStdout("terminal block created: %s\n", oref)
+	return nil
 }
